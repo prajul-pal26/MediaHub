@@ -23,6 +23,8 @@
 # misc
 .DS_Store
 *.pem
+*.deb
+mkcert-*
 
 # debug
 npm-debug.log*
@@ -30,8 +32,14 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files — NEVER commit real env files
+.env
+.env.local
+.env.production
+.env.*.local
+# Example files ARE committed (safe — no real secrets)
+!.env.development.example
+!.env.production.example
 
 # vercel
 .vercel

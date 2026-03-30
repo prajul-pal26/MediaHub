@@ -1,0 +1,29 @@
+import { Queue } from "bullmq";
+import { getQueueConnection } from "./connection";
+
+let _publishQueue: Queue | null = null;
+let _analyticsQueue: Queue | null = null;
+
+export function getPublishQueue(): Queue {
+  if (!_publishQueue) {
+    _publishQueue = new Queue("publish", {
+      connection: getQueueConnection(),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 60000 },
+        removeOnComplete: false,
+        removeOnFail: false,
+      },
+    });
+  }
+  return _publishQueue;
+}
+
+export function getAnalyticsQueue(): Queue {
+  if (!_analyticsQueue) {
+    _analyticsQueue = new Queue("analytics-fetch", {
+      connection: getQueueConnection(),
+    });
+  }
+  return _analyticsQueue;
+}
