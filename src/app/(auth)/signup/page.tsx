@@ -52,6 +52,13 @@ function SignupForm() {
   async function handleSignup(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+
+    // Block signup without a valid invitation
+    if (!inviteToken || inviteValid === false) {
+      setError("Signup requires an invitation. Contact your admin to get an invite link.");
+      return;
+    }
+
     setLoading(true);
 
     const { error } = await supabase.auth.signUp({
@@ -89,11 +96,21 @@ function SignupForm() {
                 You&apos;ve been invited to join an organization
               </span>
             ) : (
-              "Start managing your social media. A new organization will be created for you."
+              "Signup is invite-only. Contact your admin to get an invite link."
             )}
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {!isInvited && (
+            <div className="p-4 bg-amber-50 text-amber-800 rounded-lg text-sm text-center">
+              <p className="font-medium">Invite-only access</p>
+              <p className="mt-1">You need an invitation link from an admin to sign up.</p>
+              <Link href="/login" className="mt-3 inline-block text-primary underline text-sm">
+                Already have an account? Log in
+              </Link>
+            </div>
+          )}
+
           {isInvited && inviteChecking && (
             <div className="mb-4 p-3 bg-gray-50 text-gray-600 rounded-lg text-sm text-center">
               Validating invitation...
@@ -112,7 +129,7 @@ function SignupForm() {
             </div>
           )}
 
-          <form onSubmit={handleSignup} className="space-y-4">
+          {isInvited && <form onSubmit={handleSignup} className="space-y-4">
             {error && (
               <div className="p-3 text-sm text-red-600 bg-red-50 rounded-md">{error}</div>
             )}
@@ -163,14 +180,14 @@ function SignupForm() {
                     ? "Accept & Create Account"
                     : "Create account"}
             </Button>
-          </form>
+          </form>}
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
+          {isInvited && <p className="mt-6 text-center text-sm text-muted-foreground">
             Already have an account?{" "}
             <Link href="/login" className="text-primary hover:underline font-medium">
               Sign in
             </Link>
-          </p>
+          </p>}
         </CardContent>
       </Card>
     </div>
