@@ -145,8 +145,7 @@ export function UserManagement({ profile }: UserManagementProps) {
     return false;
   }
 
-  // Every role except agency_admin needs a brand assignment
-  const needsBrand = inviteRole !== "agency_admin" && inviteRole !== "";
+  const needsBrand = BRAND_ROLES.includes(inviteRole as any);
   const inviteNeedsAssigned = inviteRole === "agency_editor";
 
   function handleInvite() {
