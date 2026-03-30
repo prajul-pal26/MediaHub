@@ -56,8 +56,8 @@ export const invitationsRouter = router({
         });
       }
 
-      if (["brand_owner", "brand_editor", "brand_viewer"].includes(input.role) && !input.brandId) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Brand ID required for brand-level roles" });
+      if (["agency_editor", "brand_owner", "brand_editor", "brand_viewer"].includes(input.role) && !input.brandId) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Brand ID required for this role" });
       }
 
       if (profile.role === "brand_owner" && input.brandId !== profile.brand_id) {
