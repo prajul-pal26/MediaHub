@@ -36,7 +36,7 @@ npm run worker:dev
 
 # 7. Open https://localhost:3443 in your browser
 #    Click "Advanced" → "Proceed to localhost" on the certificate warning
-#    Sign up — the first user becomes the super admin
+#    Login with: pranjul@deepvidya.ai / 123456
 ```
 
 That's it. The app is running.

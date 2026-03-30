@@ -55,6 +55,11 @@ echo "6. Reloading PostgREST schema cache..."
 docker restart media_publisher-rest-1 >/dev/null 2>&1 || true
 echo "   OK"
 
+# 7. Create default super admin
+echo "7. Creating default super admin..."
+bash scripts/create-superadmin.sh
+echo "   OK"
+
 echo ""
 echo "=== Database setup complete ==="
 echo ""
@@ -62,4 +67,5 @@ echo "You can now:"
 echo "  1. Start the app:    npm run dev:https"
 echo "  2. Start the worker: npm run worker:dev"
 echo "  3. Open the app:     https://localhost:3443"
+echo "  4. Login with:       pranjul@deepvidya.ai / 123456"
 echo ""
