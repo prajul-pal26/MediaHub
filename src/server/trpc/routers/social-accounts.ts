@@ -158,6 +158,70 @@ export const socialAccountsRouter = router({
       if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Account not found" });
       assertBrandAccess(profile, account.brand_id);
 
+      // Clean up all content tied to this social account before deleting
+
+      // 1. Delete comment replies linked to this account's comments
+      const { data: commentIds } = await db
+        .from("platform_comments")
+        .select("id")
+        .eq("social_account_id", input.accountId);
+      if (commentIds && commentIds.length > 0) {
+        await db
+          .from("comment_replies")
+          .delete()
+          .in("comment_id", commentIds.map((c: any) => c.id));
+      }
+
+      // 2. Delete platform comments from this account
+      await db
+        .from("platform_comments")
+        .delete()
+        .eq("social_account_id", input.accountId);
+
+      // 3. Delete comment sentiments for posts published via this account
+      const { data: jobsWithPosts } = await db
+        .from("publish_jobs")
+        .select("post_id")
+        .eq("social_account_id", input.accountId)
+        .not("post_id", "is", null);
+      const postIds = [...new Set((jobsWithPosts || []).map((j: any) => j.post_id).filter(Boolean))];
+
+      if (postIds.length > 0) {
+        await db
+          .from("comment_sentiments")
+          .delete()
+          .in("post_id", postIds);
+      }
+
+      // 4. Delete post analytics for this account
+      await db
+        .from("post_analytics")
+        .delete()
+        .eq("social_account_id", input.accountId);
+
+      // 5. Delete publish jobs for this account
+      await db
+        .from("publish_jobs")
+        .delete()
+        .eq("social_account_id", input.accountId);
+
+      // 6. Clean up content_posts that have no remaining publish jobs
+      if (postIds.length > 0) {
+        for (const postId of postIds) {
+          const { count } = await db
+            .from("publish_jobs")
+            .select("id", { count: "exact", head: true })
+            .eq("post_id", postId);
+          if (count === 0) {
+            // No jobs left — delete orphaned post and its analytics
+            await db.from("post_analytics").delete().eq("post_id", postId);
+            await db.from("comment_sentiments").delete().eq("post_id", postId);
+            await db.from("content_posts").delete().eq("id", postId);
+          }
+        }
+      }
+
+      // 7. Finally delete the social account itself
       const { error } = await db
         .from("social_accounts")
         .delete()

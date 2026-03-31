@@ -700,18 +700,51 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
-      // Get analytics with platform info
-      const { data: analytics } = await db
-        .from("post_analytics")
-        .select("views, likes, comments, shares, saves, reach, impressions, clicks, retention_rate, watch_time_seconds, social_account_id, social_accounts!inner(brand_id, platform)")
-        .eq("social_accounts.brand_id", input.brandId);
+      // Query analytics through content_posts (brand-scoped, survives social account deletion)
+      const { data: brandPosts } = await db
+        .from("content_posts")
+        .select("id")
+        .eq("brand_id", input.brandId)
+        .eq("status", "published");
 
-      const all = (analytics || []) as any[];
+      const brandPostIds = (brandPosts || []).map((p: any) => p.id);
+      let all: any[] = [];
 
-      // Aggregate by platform
+      if (brandPostIds.length > 0) {
+        const { data: analytics } = await db
+          .from("post_analytics")
+          .select("post_id, views, likes, comments, shares, saves, reach, impressions, clicks, retention_rate, watch_time_seconds, social_account_id")
+          .in("post_id", brandPostIds);
+        all = (analytics || []) as any[];
+      }
+
+      // Determine platform per analytics row from publish_jobs
       const platformMap: Record<string, any[]> = {};
       for (const a of all) {
-        const platform = a.social_accounts?.platform || "unknown";
+        let platform = "unknown";
+        if (a.social_account_id) {
+          // Try to get platform from social_accounts (may be deleted)
+          const { data: acc } = await db
+            .from("social_accounts")
+            .select("platform")
+            .eq("id", a.social_account_id)
+            .maybeSingle();
+          if (acc) platform = acc.platform;
+        }
+        if (platform === "unknown" && a.post_id) {
+          // Fallback: infer platform from publish_jobs action
+          const { data: job } = await db
+            .from("publish_jobs")
+            .select("action")
+            .eq("post_id", a.post_id)
+            .limit(1)
+            .maybeSingle();
+          if (job?.action) {
+            if (job.action.startsWith("ig_")) platform = "instagram";
+            else if (job.action.startsWith("yt_")) platform = "youtube";
+            else if (job.action.startsWith("li_")) platform = "linkedin";
+          }
+        }
         if (!platformMap[platform]) platformMap[platform] = [];
         platformMap[platform].push(a);
       }
