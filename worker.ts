@@ -2216,6 +2216,201 @@ const commentReplyWorker = new Worker(
   { connection: redis }
 );
 
+// ─── Auto-Reply Worker (LLM-powered) ───
+
+async function generateAutoReply(
+  comment: any,
+  postContext: string,
+  brandName: string,
+  tone: string,
+  customInstructions: string,
+  orgId: string,
+  brandId: string
+): Promise<string> {
+  // Multi-level LLM resolution: check brand access → org default
+  const { data: brandAccess } = await db().from("llm_brand_access")
+    .select("provider, is_active")
+    .eq("brand_id", brandId)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
+  let provider = "openrouter";
+  let apiKey = "";
+  let model = "";
+
+  if (brandAccess) {
+    const providerMap: Record<string, string> = {
+      llm_openrouter: "openrouter", llm_anthropic: "anthropic",
+      llm_openai: "openai", llm_google: "google",
+    };
+    const mappedProvider = providerMap[brandAccess.provider] || brandAccess.provider;
+    const { data: cred } = await db().from("platform_credentials")
+      .select("client_id_encrypted, metadata")
+      .eq("org_id", orgId).eq("platform", brandAccess.provider).single();
+    if (cred) {
+      apiKey = decrypt(cred.client_id_encrypted);
+      provider = mappedProvider;
+      model = (cred.metadata as any)?.default_model || "";
+    }
+  }
+
+  if (!apiKey) {
+    const { data: orgConfig } = await db().from("llm_configurations")
+      .select("provider, api_key_encrypted, base_url, default_model")
+      .eq("org_id", orgId).eq("scope", "org").eq("is_active", true)
+      .limit(1).maybeSingle();
+    if (!orgConfig) throw new Error("No LLM configured for auto-reply");
+    provider = orgConfig.provider;
+    apiKey = decrypt(orgConfig.api_key_encrypted);
+    model = orgConfig.default_model || "";
+  }
+
+  if (!model) {
+    const defaults: Record<string, string> = {
+      openrouter: "anthropic/claude-sonnet-4-20250514",
+      anthropic: "claude-sonnet-4-20250514",
+      openai: "gpt-4o-mini",
+      google: "gemini-2.0-flash",
+    };
+    model = defaults[provider] || "anthropic/claude-sonnet-4-20250514";
+  }
+
+  const systemPrompt = `You are a social media community manager for "${brandName}". Generate a reply to a comment on the brand's post.
+
+Rules:
+- Tone: ${tone}
+- Keep replies concise (1-3 sentences max)
+- Be genuine and natural, not robotic
+- If the comment is a question, answer helpfully
+- If positive, thank them warmly
+- If negative, be empathetic and offer to help
+- Never be defensive or argumentative
+- Match the language of the commenter
+- Do NOT use hashtags in replies
+- Do NOT include quotes or prefixes like "Reply:"
+${customInstructions ? `\nAdditional instructions: ${customInstructions}` : ""}
+
+Respond with ONLY the reply text, nothing else.`;
+
+  const userMessage = `Post context: ${postContext}\n\nComment by @${comment.author_username}: "${comment.comment_text}"\n\nPlatform: ${comment.platform}`;
+
+  let replyText = "";
+
+  if (provider === "openrouter") {
+    const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
+    });
+    const data = await res.json();
+    replyText = data.choices?.[0]?.message?.content || "";
+  } else if (provider === "anthropic") {
+    const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": apiKey, "Content-Type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, system: systemPrompt, messages: [{ role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
+    });
+    const data = await res.json();
+    replyText = data.content?.[0]?.text || "";
+  } else if (provider === "openai") {
+    const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
+    });
+    const data = await res.json();
+    replyText = data.choices?.[0]?.message?.content || "";
+  } else if (provider === "google") {
+    const res = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }], generationConfig: { maxOutputTokens: 300, temperature: 0.7 } }),
+      }
+    );
+    const data = await res.json();
+    replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  }
+
+  if (!replyText.trim()) throw new Error("LLM returned empty reply");
+  return replyText.trim();
+}
+
+const autoReplyWorker = new Worker(
+  "auto-reply",
+  async () => {
+    const { data: brands } = await db().from("brands")
+      .select("id, org_id, name, settings");
+
+    for (const brand of brands || []) {
+      const settings = (brand.settings || {}) as Record<string, any>;
+      if (!settings.auto_reply_enabled) continue;
+
+      const tone = settings.auto_reply_tone || "friendly";
+      const maxPerHour = settings.auto_reply_max_per_hour || 20;
+      const excludeSentiments = settings.auto_reply_exclude_sentiments || [];
+      const customInstructions = settings.auto_reply_instructions || "";
+
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const { count: recentReplies } = await db().from("comment_replies")
+        .select("id", { count: "exact", head: true })
+        .eq("brand_id", brand.id)
+        .gte("created_at", oneHourAgo);
+
+      if ((recentReplies || 0) >= maxPerHour) {
+        console.log(`[auto-reply] ${brand.name}: rate limit (${recentReplies}/${maxPerHour}/hr)`);
+        continue;
+      }
+
+      const remaining = maxPerHour - (recentReplies || 0);
+
+      const { data: comments } = await db().from("platform_comments")
+        .select("id, platform, platform_comment_id, platform_post_id, author_username, comment_text, sentiment, post_id, social_account_id")
+        .eq("brand_id", brand.id)
+        .eq("status", "unread")
+        .eq("is_hidden", false)
+        .is("platform_parent_comment_id", null)
+        .order("comment_timestamp", { ascending: true })
+        .limit(Math.min(remaining, 10));
+
+      for (const comment of comments || []) {
+        if (comment.sentiment && excludeSentiments.includes(comment.sentiment)) continue;
+
+        try {
+          let postContext = "No additional context";
+          if (comment.post_id) {
+            const { data: post } = await db().from("content_posts")
+              .select("group_id").eq("id", comment.post_id).single();
+            if (post?.group_id) {
+              const { data: group } = await db().from("media_groups")
+                .select("title, caption, description, tags")
+                .eq("id", post.group_id).single();
+              if (group) postContext = `Title: "${group.title}"\nCaption: "${group.caption || ""}"\nTags: ${(group.tags || []).join(", ")}`;
+            }
+          }
+
+          const replyText = await generateAutoReply(comment, postContext, brand.name, tone, customInstructions, brand.org_id, brand.id);
+
+          await db().from("comment_replies").insert({
+            comment_id: comment.id,
+            brand_id: brand.id,
+            replied_by: null,
+            reply_text: replyText,
+            status: "pending",
+          });
+
+          await db().from("platform_comments").update({ status: "replied" }).eq("id", comment.id);
+          console.log(`[auto-reply] ${brand.name}: replied to @${comment.author_username} on ${comment.platform}`);
+          await new Promise(r => setTimeout(r, 1500));
+        } catch (e: any) {
+          console.error(`[auto-reply] Failed for comment ${comment.id}:`, e.message);
+        }
+      }
+    }
+  },
+  { connection: redis }
+);
+
 // ─── Startup ───
 
 async function verifyStartup() {
@@ -2272,6 +2467,11 @@ async function verifyStartup() {
   const commentReplyQueue = new Queue("comment-reply", { connection: redis });
   await commentReplyQueue.add("process-pending", {}, { repeat: { every: 30 * 1000 }, jobId: "comment-reply-cron" });
   console.log("  ✓ Comment reply processing (every 30s)");
+
+  // Auto-reply — every 60 seconds (checks for new unread comments on auto-reply brands)
+  const autoReplyQueue = new Queue("auto-reply", { connection: redis });
+  await autoReplyQueue.add("process-auto", {}, { repeat: { every: 60 * 1000 }, jobId: "auto-reply-cron" });
+  console.log("  ✓ Auto-reply processing (every 60s)");
 }
 
 console.log("Worker starting...");
@@ -2289,6 +2489,7 @@ process.on("SIGTERM", async () => {
   await trendForecastWorker.close();
   await commentSyncWorker.close();
   await commentReplyWorker.close();
+  await autoReplyWorker.close();
   await redis.quit();
   process.exit(0);
 });

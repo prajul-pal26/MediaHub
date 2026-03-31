@@ -19,6 +19,7 @@ import {
   Brain,
   Heart,
   Users,
+  MessagesSquare,
 } from "lucide-react";
 
 interface NavItem {
@@ -37,6 +38,7 @@ const navItems: NavItem[] = [
   { label: "Media Library", href: "/library", icon: Image, mode: "click" },
   { label: "Upload", href: "/upload", icon: Upload, mode: "click" },
   { label: "Calendar", href: "/calendar", icon: CalendarDays, mode: "click" },
+  { label: "Threads", href: "/threads", icon: MessagesSquare, mode: "click" },
   { label: "Queue", href: "/queue", icon: ListTodo, mode: "click" },
   { label: "Accounts", href: "/accounts", icon: Link2, mode: "click" },
   {
