@@ -149,7 +149,7 @@ export const mediaRouter = router({
         height: z.number().optional(),
         aspectRatio: z.string().optional(),
         durationSeconds: z.number().optional(),
-        taggedPlatform: z.enum(["instagram", "youtube", "linkedin"]).optional(),
+        taggedPlatform: z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]).optional(),
         taggedAccountId: z.string().uuid().optional(),
         taggedAction: z.enum(["post", "reel", "short", "story", "video", "carousel", "article"]).optional(),
         sortOrder: z.number().default(0),

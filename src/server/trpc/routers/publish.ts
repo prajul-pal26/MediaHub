@@ -5,7 +5,7 @@ import { getValidActions, getPlatformMetadata } from "@/server/services/media/ru
 import { getPublishQueue } from "@/server/queue/queues";
 import { logAudit } from "@/server/services/audit";
 
-const actionSchema = z.enum(["ig_post", "ig_reel", "ig_story", "ig_carousel", "yt_video", "yt_short", "li_post", "li_article"]);
+const actionSchema = z.enum(["ig_post", "ig_reel", "ig_story", "ig_carousel", "yt_video", "yt_short", "li_post", "li_article", "fb_post", "fb_reel", "fb_story", "tt_video", "tw_post", "sc_story"]);
 
 export const publishRouter = router({
   // Get all data needed for publish page

@@ -70,7 +70,7 @@ export default function CompetitorsPage() {
     addMutation.mutate({
       brandId: activeBrandId,
       handle: handle.trim(),
-      platform: platform as "instagram" | "youtube" | "linkedin",
+      platform: platform as "instagram" | "youtube" | "linkedin" | "facebook" | "tiktok" | "twitter" | "snapchat",
     });
   }
 

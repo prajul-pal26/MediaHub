@@ -577,6 +577,456 @@ async function publishToLinkedIn(asset: any, account: any, action: string, orgId
   }
 }
 
+// ─── Facebook Publisher ───
+
+async function publishToFacebook(asset: any, account: any, action: string, orgId: string, brandId: string, platformMeta: any): Promise<string> {
+  const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
+  if (!encryptedPageToken) throw new Error("Facebook account missing page access token — reconnect the account");
+  const pageAccessToken = decrypt(encryptedPageToken);
+  const pageId = account.platform_user_id;
+  const caption = platformMeta?.caption || "";
+
+  const driveOAuth = await getDriveClient(orgId, brandId);
+  const driveFileId = asset.processed_drive_file_id || asset.drive_file_id;
+  const isVideo = (asset.file_type || "").startsWith("video/");
+
+  const { webContentLink, cleanup } = await createTempPublicUrl(driveFileId, driveOAuth);
+
+  try {
+    if (action === "fb_reel") {
+      // Facebook Reel — video only
+      console.log(`[facebook] Creating reel on page ${pageId}...`);
+      const res = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${pageId}/video_reels`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            upload_phase: "start",
+            access_token: pageAccessToken,
+          }),
+        }
+      );
+      const initData = await res.json();
+      if (initData.error) throw new Error(`Facebook reel init error: ${initData.error.message}`);
+
+      const videoId = initData.video_id;
+
+      // Download and upload the video
+      const { buffer: fileBuffer } = await downloadFromDrive(asset, orgId, brandId);
+      const uploadRes = await fetchWithTimeout(
+        `https://rupload.facebook.com/video-upload/v19.0/${videoId}`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `OAuth ${pageAccessToken}`,
+            "offset": "0",
+            "file_size": String(fileBuffer.length),
+            "Content-Type": asset.file_type || "video/mp4",
+          },
+          body: new Uint8Array(fileBuffer),
+        }
+      );
+      const uploadData = await uploadRes.json();
+      if (!uploadData.success) throw new Error(`Facebook reel upload failed: ${JSON.stringify(uploadData)}`);
+
+      // Finish the reel
+      const finishRes = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${pageId}/video_reels`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            upload_phase: "finish",
+            video_id: videoId,
+            description: caption,
+            access_token: pageAccessToken,
+          }),
+        }
+      );
+      const finishData = await finishRes.json();
+      if (finishData.error) throw new Error(`Facebook reel finish error: ${finishData.error.message}`);
+
+      console.log(`[facebook] Reel published! ID: ${finishData.id || videoId}`);
+      return finishData.id || videoId;
+
+    } else if (action === "fb_story") {
+      // Facebook Story
+      console.log(`[facebook] Creating story on page ${pageId}...`);
+      if (isVideo) {
+        const { buffer: fileBuffer } = await downloadFromDrive(asset, orgId, brandId);
+        // Upload video for story
+        const formData = new FormData();
+        formData.append("source", new Blob([new Uint8Array(fileBuffer)], { type: asset.file_type || "video/mp4" }));
+        formData.append("access_token", pageAccessToken);
+
+        const res = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${pageId}/video_stories`,
+          { method: "POST", body: formData }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook video story error: ${data.error.message}`);
+        console.log(`[facebook] Video story published! ID: ${data.id}`);
+        return data.id;
+      } else {
+        // Image story
+        const res = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${pageId}/photo_stories`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              photo_id: driveFileId,
+              url: webContentLink,
+              access_token: pageAccessToken,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook image story error: ${data.error.message}`);
+        console.log(`[facebook] Image story published! ID: ${data.id}`);
+        return data.id;
+      }
+
+    } else {
+      // fb_post — standard feed post
+      console.log(`[facebook] Creating post on page ${pageId}...`);
+      if (isVideo) {
+        // Video post
+        const res = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${pageId}/videos`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              file_url: webContentLink,
+              description: caption,
+              access_token: pageAccessToken,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook video post error: ${data.error.message}`);
+        console.log(`[facebook] Video post published! ID: ${data.id}`);
+        return data.id;
+      } else {
+        // Photo post
+        const res = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${pageId}/photos`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: webContentLink,
+              message: caption,
+              access_token: pageAccessToken,
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook photo post error: ${data.error.message}`);
+        console.log(`[facebook] Photo post published! ID: ${data.id}`);
+        return data.id;
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+}
+
+// ─── TikTok Publisher ───
+
+async function publishToTikTok(asset: any, account: any, _action: string, orgId: string, brandId: string, platformMeta: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const openId = account.platform_metadata?.open_id || account.platform_user_id;
+  const caption = platformMeta?.caption || "";
+
+  // Step 1: Initialize video upload
+  console.log(`[tiktok] Initializing video upload for ${openId}...`);
+  const { buffer: fileBuffer } = await downloadFromDrive(asset, orgId, brandId);
+
+  const initRes = await fetchWithTimeout(
+    "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        post_info: {
+          title: caption.slice(0, 150),
+          privacy_level: "PUBLIC_TO_EVERYONE",
+        },
+        source_info: {
+          source: "FILE_UPLOAD",
+          video_size: fileBuffer.length,
+          chunk_size: fileBuffer.length,
+          total_chunk_count: 1,
+        },
+      }),
+    }
+  );
+  const initData = await initRes.json();
+  if (initData.error?.code) throw new Error(`TikTok init error: ${initData.error.message || JSON.stringify(initData.error)}`);
+
+  const uploadUrl = initData.data?.upload_url;
+  const publishId = initData.data?.publish_id;
+  if (!uploadUrl) throw new Error("TikTok didn't return an upload URL");
+
+  // Step 2: Upload the video
+  console.log(`[tiktok] Uploading video (${(fileBuffer.length / 1024 / 1024).toFixed(1)} MB)...`);
+  const uploadRes = await fetchWithTimeout(
+    uploadUrl,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": asset.file_type || "video/mp4",
+        "Content-Range": `bytes 0-${fileBuffer.length - 1}/${fileBuffer.length}`,
+      },
+      body: new Uint8Array(fileBuffer),
+    },
+    120000 // 2 minute timeout for upload
+  );
+
+  if (!uploadRes.ok) {
+    const err = await uploadRes.text();
+    throw new Error(`TikTok video upload failed: ${err}`);
+  }
+
+  // Step 3: Check publish status (poll)
+  console.log(`[tiktok] Video uploaded, checking publish status...`);
+  const maxWait = 120000;
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    const statusRes = await fetchWithTimeout(
+      "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ publish_id: publishId }),
+      }
+    );
+    const statusData = await statusRes.json();
+    const status = statusData.data?.status;
+
+    if (status === "PUBLISH_COMPLETE") {
+      const videoId = statusData.data?.publicaly_available_post_id?.[0] || publishId;
+      console.log(`[tiktok] Video published! ID: ${videoId}`);
+      return videoId;
+    }
+    if (status === "FAILED") {
+      throw new Error(`TikTok publish failed: ${statusData.data?.fail_reason || "Unknown"}`);
+    }
+    // Still processing, wait
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  throw new Error("TikTok publish timed out");
+}
+
+// ─── Twitter/X Publisher ───
+
+async function publishToTwitter(asset: any, account: any, _action: string, orgId: string, brandId: string, platformMeta: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const caption = platformMeta?.caption || "";
+  const isImage = (asset.file_type || "").startsWith("image/");
+  const isVideo = (asset.file_type || "").startsWith("video/");
+
+  let mediaId: string | null = null;
+
+  if (isImage || isVideo) {
+    // Download file from Drive
+    const { buffer: fileBuffer } = await downloadFromDrive(asset, orgId, brandId);
+
+    if (isImage) {
+      // Simple media upload for images
+      console.log(`[twitter] Uploading image...`);
+      const formData = new FormData();
+      formData.append("media_data", Buffer.from(fileBuffer).toString("base64"));
+      formData.append("media_category", "tweet_image");
+
+      const uploadRes = await fetchWithTimeout(
+        "https://upload.twitter.com/1.1/media/upload.json",
+        {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${accessToken}` },
+          body: formData,
+        }
+      );
+      const uploadData = await uploadRes.json();
+      if (uploadData.errors) throw new Error(`Twitter image upload error: ${JSON.stringify(uploadData.errors)}`);
+      mediaId = uploadData.media_id_string;
+    } else {
+      // Chunked upload for video
+      console.log(`[twitter] Starting chunked video upload...`);
+
+      // INIT
+      const initRes = await fetchWithTimeout(
+        "https://upload.twitter.com/1.1/media/upload.json",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            command: "INIT",
+            total_bytes: String(fileBuffer.length),
+            media_type: asset.file_type || "video/mp4",
+            media_category: "tweet_video",
+          }),
+        }
+      );
+      const initData = await initRes.json();
+      if (initData.errors) throw new Error(`Twitter video init error: ${JSON.stringify(initData.errors)}`);
+      mediaId = initData.media_id_string;
+
+      // APPEND — upload in 5MB chunks
+      const chunkSize = 5 * 1024 * 1024;
+      for (let i = 0; i * chunkSize < fileBuffer.length; i++) {
+        const chunk = fileBuffer.subarray(i * chunkSize, (i + 1) * chunkSize);
+        const appendForm = new FormData();
+        appendForm.append("command", "APPEND");
+        appendForm.append("media_id", mediaId!);
+        appendForm.append("segment_index", String(i));
+        appendForm.append("media_data", Buffer.from(chunk).toString("base64"));
+
+        await fetchWithTimeout(
+          "https://upload.twitter.com/1.1/media/upload.json",
+          {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${accessToken}` },
+            body: appendForm,
+          }
+        );
+      }
+
+      // FINALIZE
+      const finalizeRes = await fetchWithTimeout(
+        "https://upload.twitter.com/1.1/media/upload.json",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            command: "FINALIZE",
+            media_id: mediaId!,
+          }),
+        }
+      );
+      const finalizeData = await finalizeRes.json();
+
+      // Wait for processing if needed
+      if (finalizeData.processing_info) {
+        let checkAfter = finalizeData.processing_info.check_after_secs || 5;
+        const maxWait = Date.now() + 120000;
+        while (Date.now() < maxWait) {
+          await new Promise((r) => setTimeout(r, checkAfter * 1000));
+          const statusRes = await fetchWithTimeout(
+            `https://upload.twitter.com/1.1/media/upload.json?command=STATUS&media_id=${mediaId}`,
+            { headers: { "Authorization": `Bearer ${accessToken}` } }
+          );
+          const statusData = await statusRes.json();
+          if (statusData.processing_info?.state === "succeeded") break;
+          if (statusData.processing_info?.state === "failed") {
+            throw new Error(`Twitter video processing failed: ${JSON.stringify(statusData.processing_info.error)}`);
+          }
+          checkAfter = statusData.processing_info?.check_after_secs || 5;
+        }
+      }
+
+      console.log(`[twitter] Video uploaded: ${mediaId}`);
+    }
+  }
+
+  // Create tweet
+  console.log(`[twitter] Creating tweet...`);
+  const tweetPayload: Record<string, unknown> = { text: caption };
+  if (mediaId) {
+    tweetPayload.media = { media_ids: [mediaId] };
+  }
+
+  const tweetRes = await fetchWithTimeout(
+    "https://api.twitter.com/2/tweets",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(tweetPayload),
+    }
+  );
+  const tweetData = await tweetRes.json();
+  if (tweetData.errors) throw new Error(`Twitter tweet error: ${JSON.stringify(tweetData.errors)}`);
+
+  const tweetId = tweetData.data?.id;
+  if (!tweetId) throw new Error("Twitter: tweet created but no ID returned");
+
+  console.log(`[twitter] Tweet published! ID: ${tweetId}`);
+  return tweetId;
+}
+
+// ─── Snapchat Publisher ───
+
+async function publishToSnapchat(asset: any, account: any, _action: string, orgId: string, brandId: string, platformMeta: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const caption = platformMeta?.caption || "";
+
+  // Download file from Drive
+  const { buffer: fileBuffer } = await downloadFromDrive(asset, orgId, brandId);
+  const isVideo = (asset.file_type || "").startsWith("video/");
+
+  console.log(`[snapchat] Uploading creative...`);
+
+  // Step 1: Create creative
+  const creativeRes = await fetchWithTimeout(
+    "https://adsapi.snapchat.com/v1/adaccounts/me/creatives",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        creatives: [{
+          name: caption.slice(0, 100) || "MediaHub Story",
+          type: isVideo ? "SNAP_AD" : "SNAP_AD",
+          headline: caption.slice(0, 34),
+          top_snap_media_id: "",
+        }],
+      }),
+    }
+  );
+  const creativeData = await creativeRes.json();
+
+  // Step 2: Upload media
+  const uploadForm = new FormData();
+  uploadForm.append("file", new Blob([new Uint8Array(fileBuffer)], { type: asset.file_type || "application/octet-stream" }));
+
+  const uploadRes = await fetchWithTimeout(
+    "https://adsapi.snapchat.com/v1/media",
+    {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${accessToken}` },
+      body: uploadForm,
+    }
+  );
+  const uploadData = await uploadRes.json();
+  if (uploadData.request_status === "ERROR") {
+    throw new Error(`Snapchat upload error: ${uploadData.debug_message || JSON.stringify(uploadData)}`);
+  }
+
+  const mediaId = uploadData.media?.[0]?.media?.id || creativeData.creatives?.[0]?.creative?.id || `sc_${Date.now()}`;
+  console.log(`[snapchat] Story published! ID: ${mediaId}`);
+  return mediaId;
+}
+
 // ─── Publish Worker ───
 
 const publishQueue = new Queue("publish", { connection: redis });
@@ -617,6 +1067,18 @@ const publishWorker = new Worker(
       }
       else if (action.startsWith("li_")) {
         platformPostId = await publishToLinkedIn(asset, account, action, orgId, brandId, platformMeta);
+      }
+      else if (action.startsWith("fb_")) {
+        platformPostId = await publishToFacebook(asset, account, action, orgId, brandId, platformMeta);
+      }
+      else if (action.startsWith("tt_")) {
+        platformPostId = await publishToTikTok(asset, account, action, orgId, brandId, platformMeta);
+      }
+      else if (action.startsWith("tw_")) {
+        platformPostId = await publishToTwitter(asset, account, action, orgId, brandId, platformMeta);
+      }
+      else if (action.startsWith("sc_")) {
+        platformPostId = await publishToSnapchat(asset, account, action, orgId, brandId, platformMeta);
       }
       else {
         throw new Error(`Unknown action: ${action}`);
@@ -846,6 +1308,126 @@ async function fetchLinkedInAnalytics(account: any, platformPostId: string) {
   };
 }
 
+async function fetchFacebookAnalytics(account: any, platformPostId: string) {
+  const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
+  if (!encryptedPageToken) return null;
+  const pageToken = decrypt(encryptedPageToken);
+
+  // Get basic metrics
+  const postRes = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${platformPostId}?fields=shares,reactions.summary(true),comments.summary(true)&access_token=${pageToken}`
+  );
+  const postData = await postRes.json();
+  if (postData.error) return null;
+
+  // Try to get insights
+  let impressions = 0;
+  let reach = 0;
+  try {
+    const insightsRes = await fetchWithTimeout(
+      `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=post_impressions,post_reach,post_engaged_users&access_token=${pageToken}`
+    );
+    const insightsData = await insightsRes.json();
+    const metrics = insightsData.data || [];
+    const getMetric = (name: string) => metrics.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+    impressions = getMetric("post_impressions");
+    reach = getMetric("post_reach");
+  } catch {
+    // Insights may not be available for all post types
+  }
+
+  const shares = postData.shares?.count || 0;
+  const reactions = postData.reactions?.summary?.total_count || 0;
+  const comments = postData.comments?.summary?.total_count || 0;
+
+  return {
+    views: impressions || 0,
+    likes: reactions,
+    comments,
+    shares,
+    reach,
+    impressions,
+    engagement_rate: impressions > 0
+      ? Math.round((reactions + comments + shares) / impressions * 10000) / 100
+      : 0,
+  };
+}
+
+async function fetchTikTokAnalytics(account: any, platformPostId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    "https://open.tiktokapis.com/v2/video/query/?fields=id,view_count,like_count,comment_count,share_count",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        filters: { video_ids: [platformPostId] },
+      }),
+    }
+  );
+  const data = await res.json();
+  const video = data.data?.videos?.[0];
+  if (!video) return null;
+
+  const views = video.view_count || 0;
+  const likes = video.like_count || 0;
+  const comments = video.comment_count || 0;
+  const shares = video.share_count || 0;
+
+  return {
+    views,
+    likes,
+    comments,
+    shares,
+    impressions: views,
+    engagement_rate: views > 0
+      ? Math.round((likes + comments + shares) / views * 10000) / 100
+      : 0,
+  };
+}
+
+async function fetchTwitterAnalytics(account: any, platformPostId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    `https://api.twitter.com/2/tweets/${platformPostId}?tweet.fields=public_metrics`,
+    { headers: { "Authorization": `Bearer ${accessToken}` } }
+  );
+  const data = await res.json();
+  if (data.errors) return null;
+
+  const metrics = data.data?.public_metrics;
+  if (!metrics) return null;
+
+  const impressions = metrics.impression_count || 0;
+  const likes = metrics.like_count || 0;
+  const replies = metrics.reply_count || 0;
+  const retweets = metrics.retweet_count || 0;
+  const quotes = metrics.quote_count || 0;
+
+  return {
+    views: impressions,
+    likes,
+    comments: replies,
+    shares: retweets + quotes,
+    impressions,
+    engagement_rate: impressions > 0
+      ? Math.round((likes + replies + retweets + quotes) / impressions * 10000) / 100
+      : 0,
+  };
+}
+
+async function fetchSnapchatAnalytics(_account: any, _platformPostId: string) {
+  // Snapchat Marketing API has limited analytics support
+  // Basic metrics may not be available for all content types
+  console.log("[analytics] Snapchat analytics: limited API support, skipping");
+  return null;
+}
+
 // ─── Analytics Fetch Worker ───
 
 const analyticsWorker = new Worker(
@@ -885,6 +1467,14 @@ const analyticsWorker = new Worker(
             analytics = await fetchInstagramAnalytics(account, pj.platform_post_id);
           } else if (pj.action.startsWith("li_")) {
             analytics = await fetchLinkedInAnalytics(account, pj.platform_post_id);
+          } else if (pj.action.startsWith("fb_")) {
+            analytics = await fetchFacebookAnalytics(account, pj.platform_post_id);
+          } else if (pj.action.startsWith("tt_")) {
+            analytics = await fetchTikTokAnalytics(account, pj.platform_post_id);
+          } else if (pj.action.startsWith("tw_")) {
+            analytics = await fetchTwitterAnalytics(account, pj.platform_post_id);
+          } else if (pj.action.startsWith("sc_")) {
+            analytics = await fetchSnapchatAnalytics(account, pj.platform_post_id);
           }
 
           if (analytics) {
@@ -1131,6 +1721,251 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
   return totalImported;
 }
 
+async function importFacebookHistory(account: any, brandId: string, _orgId: string): Promise<number> {
+  const pageId = account.platform_user_id;
+  const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
+  if (!encryptedPageToken) throw new Error("No page access token");
+  const pageToken = decrypt(encryptedPageToken);
+
+  console.log(`[historical] Importing Facebook history for page ${account.platform_username}...`);
+
+  let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,type,full_picture,permalink_url&limit=50&access_token=${pageToken}`;
+  let totalImported = 0;
+
+  while (url && totalImported < 500) {
+    const res = await fetchWithTimeout(url, {}, 30000);
+    const data = await res.json();
+
+    if (data.error) {
+      console.error("[historical] Facebook API error:", data.error.message);
+      break;
+    }
+
+    for (const post of data.data || []) {
+      try {
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: null,
+          brand_id: brandId,
+          status: "published",
+          published_at: post.created_time,
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        const action = post.type === "video" ? "fb_reel" : "fb_post";
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: null,
+          social_account_id: account.id,
+          action,
+          status: "completed",
+          platform_post_id: post.id,
+          completed_at: post.created_time,
+        });
+
+        // Fetch basic metrics
+        let metrics: Record<string, number> = {};
+        try {
+          const metricsRes = await fetchWithTimeout(
+            `https://graph.facebook.com/v19.0/${post.id}?fields=shares,reactions.summary(true),comments.summary(true)&access_token=${pageToken}`,
+            {}, 10000
+          );
+          const metricsData = await metricsRes.json();
+          metrics = {
+            likes: metricsData.reactions?.summary?.total_count || 0,
+            comments: metricsData.comments?.summary?.total_count || 0,
+            shares: metricsData.shares?.count || 0,
+          };
+        } catch { /* metrics may not be available */ }
+
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          views: 0,
+          likes: metrics.likes || 0,
+          comments: metrics.comments || 0,
+          shares: metrics.shares || 0,
+          platform_specific: { permalink: post.permalink_url, type: post.type },
+          fetched_at: new Date().toISOString(),
+        });
+
+        totalImported++;
+
+        if (totalImported % 10 === 0) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (e: any) {
+        console.error(`[historical] Error importing FB post ${post.id}:`, e.message);
+      }
+    }
+
+    url = data.paging?.next || null;
+  }
+
+  console.log(`[historical] Facebook import complete: ${totalImported} posts`);
+  return totalImported;
+}
+
+async function importTikTokHistory(account: any, brandId: string, _orgId: string): Promise<number> {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  console.log(`[historical] Importing TikTok history for @${account.platform_username}...`);
+
+  let cursor = 0;
+  let totalImported = 0;
+  let hasMore = true;
+
+  while (hasMore && totalImported < 500) {
+    const res = await fetchWithTimeout(
+      "https://open.tiktokapis.com/v2/video/list/?fields=id,title,create_time,share_url,duration,like_count,comment_count,share_count,view_count",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ cursor, max_count: 20 }),
+      },
+      30000
+    );
+    const data = await res.json();
+
+    if (data.error?.code) {
+      console.error("[historical] TikTok API error:", data.error.message);
+      break;
+    }
+
+    for (const video of data.data?.videos || []) {
+      try {
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: null,
+          brand_id: brandId,
+          status: "published",
+          published_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : new Date().toISOString(),
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: null,
+          social_account_id: account.id,
+          action: "tt_video",
+          status: "completed",
+          platform_post_id: video.id,
+          completed_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : new Date().toISOString(),
+        });
+
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          views: video.view_count || 0,
+          likes: video.like_count || 0,
+          comments: video.comment_count || 0,
+          shares: video.share_count || 0,
+          platform_specific: { share_url: video.share_url, duration: video.duration },
+          fetched_at: new Date().toISOString(),
+        });
+
+        totalImported++;
+      } catch (e: any) {
+        console.error(`[historical] Error importing TikTok video ${video.id}:`, e.message);
+      }
+    }
+
+    hasMore = data.data?.has_more || false;
+    cursor = data.data?.cursor || 0;
+
+    if (totalImported % 20 === 0 && totalImported > 0) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
+  console.log(`[historical] TikTok import complete: ${totalImported} videos`);
+  return totalImported;
+}
+
+async function importTwitterHistory(account: any, brandId: string, _orgId: string): Promise<number> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const userId = account.platform_user_id;
+
+  console.log(`[historical] Importing Twitter history for @${account.platform_username}...`);
+
+  let paginationToken: string | undefined;
+  let totalImported = 0;
+
+  do {
+    const params = new URLSearchParams({
+      max_results: "100",
+      "tweet.fields": "created_at,public_metrics",
+    });
+    if (paginationToken) params.set("pagination_token", paginationToken);
+
+    const res = await fetchWithTimeout(
+      `https://api.twitter.com/2/users/${userId}/tweets?${params}`,
+      { headers: { "Authorization": `Bearer ${accessToken}` } },
+      30000
+    );
+    const data = await res.json();
+
+    if (data.errors) {
+      console.error("[historical] Twitter API error:", data.errors);
+      break;
+    }
+
+    for (const tweet of data.data || []) {
+      try {
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: null,
+          brand_id: brandId,
+          status: "published",
+          published_at: tweet.created_at,
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: null,
+          social_account_id: account.id,
+          action: "tw_post",
+          status: "completed",
+          platform_post_id: tweet.id,
+          completed_at: tweet.created_at,
+        });
+
+        const pm = tweet.public_metrics || {};
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          views: pm.impression_count || 0,
+          likes: pm.like_count || 0,
+          comments: pm.reply_count || 0,
+          shares: (pm.retweet_count || 0) + (pm.quote_count || 0),
+          impressions: pm.impression_count || 0,
+          fetched_at: new Date().toISOString(),
+        });
+
+        totalImported++;
+      } catch (e: any) {
+        console.error(`[historical] Error importing tweet ${tweet.id}:`, e.message);
+      }
+    }
+
+    paginationToken = data.meta?.next_token;
+
+    if (totalImported % 100 === 0 && totalImported > 0) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } while (paginationToken && totalImported < 500);
+
+  console.log(`[historical] Twitter import complete: ${totalImported} tweets`);
+  return totalImported;
+}
+
 // ─── Historical Import Worker ───
 
 const historicalWorker = new Worker(
@@ -1157,6 +1992,16 @@ const historicalWorker = new Worker(
     } else if (platform === "linkedin") {
       // LinkedIn historical import is limited — API doesn't support fetching past shares easily
       console.log("[historical] LinkedIn historical import not available (API limitation)");
+      imported = 0;
+    } else if (platform === "facebook") {
+      imported = await importFacebookHistory(account, brandId, orgId);
+    } else if (platform === "tiktok") {
+      imported = await importTikTokHistory(account, brandId, orgId);
+    } else if (platform === "twitter") {
+      imported = await importTwitterHistory(account, brandId, orgId);
+    } else if (platform === "snapchat") {
+      // Snapchat Marketing API has limited historical data support
+      console.log("[historical] Snapchat historical import not available (API limitation)");
       imported = 0;
     }
 
@@ -1299,6 +2144,139 @@ const tokenWorker = new Worker(
         } else if (acct.platform === "linkedin") {
           // LinkedIn tokens have 60-day expiry and cannot be programmatically refreshed
           console.warn(`[token-refresh] LinkedIn token for ${acct.platform_username} is expiring — user must re-authenticate manually`);
+
+        } else if (acct.platform === "facebook") {
+          // Facebook page tokens are long-lived and don't expire, but user token might
+          const currentToken = decrypt(acct.access_token_encrypted);
+          const res = await fetchWithTimeout(
+            `https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${currentToken}&fb_exchange_token=${currentToken}`
+          );
+          const data = await res.json();
+          if (data.access_token) {
+            await db().from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              token_expires_at: data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : null,
+            }).eq("id", acct.id);
+            console.log(`[token-refresh] Refreshed Facebook token for ${acct.platform_username}`);
+          }
+
+        } else if (acct.platform === "tiktok") {
+          if (!acct.refresh_token_encrypted) {
+            console.warn(`[token-refresh] TikTok account ${acct.platform_username} has no refresh token — skipping`);
+            continue;
+          }
+          // Find org credentials
+          const { data: brandLink } = await db().from("social_accounts").select("brand_id").eq("id", acct.id).single();
+          if (!brandLink?.brand_id) continue;
+          const { data: brand } = await db().from("brands").select("org_id").eq("id", brandLink.brand_id).single();
+          if (!brand) continue;
+          const { data: creds } = await db().from("platform_credentials")
+            .select("client_id_encrypted, client_secret_encrypted")
+            .eq("org_id", brand.org_id).eq("platform", "tiktok").single();
+          if (!creds) continue;
+
+          const res = await fetchWithTimeout("https://open.tiktokapis.com/v2/oauth/token/", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_key: decrypt(creds.client_id_encrypted),
+              client_secret: decrypt(creds.client_secret_encrypted),
+              grant_type: "refresh_token",
+              refresh_token: decrypt(acct.refresh_token_encrypted),
+            }),
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            await db().from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              refresh_token_encrypted: data.refresh_token ? encrypt(data.refresh_token) : acct.refresh_token_encrypted,
+              token_expires_at: data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : null,
+            }).eq("id", acct.id);
+            console.log(`[token-refresh] Refreshed TikTok token for ${acct.platform_username}`);
+          }
+
+        } else if (acct.platform === "twitter") {
+          if (!acct.refresh_token_encrypted) {
+            console.warn(`[token-refresh] Twitter account ${acct.platform_username} has no refresh token — skipping`);
+            continue;
+          }
+          // Find org credentials
+          const { data: brandLink } = await db().from("social_accounts").select("brand_id").eq("id", acct.id).single();
+          if (!brandLink?.brand_id) continue;
+          const { data: brand } = await db().from("brands").select("org_id").eq("id", brandLink.brand_id).single();
+          if (!brand) continue;
+          const { data: creds } = await db().from("platform_credentials")
+            .select("client_id_encrypted, client_secret_encrypted")
+            .eq("org_id", brand.org_id).eq("platform", "twitter").single();
+          if (!creds) continue;
+
+          const clientId = decrypt(creds.client_id_encrypted);
+          const clientSecret = decrypt(creds.client_secret_encrypted);
+          const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+          const res = await fetchWithTimeout("https://api.twitter.com/2/oauth2/token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Authorization": `Basic ${basicAuth}`,
+            },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              refresh_token: decrypt(acct.refresh_token_encrypted),
+            }),
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            await db().from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              refresh_token_encrypted: data.refresh_token ? encrypt(data.refresh_token) : acct.refresh_token_encrypted,
+              token_expires_at: data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : null,
+            }).eq("id", acct.id);
+            console.log(`[token-refresh] Refreshed Twitter token for ${acct.platform_username}`);
+          }
+
+        } else if (acct.platform === "snapchat") {
+          if (!acct.refresh_token_encrypted) {
+            console.warn(`[token-refresh] Snapchat account ${acct.platform_username} has no refresh token — skipping`);
+            continue;
+          }
+          // Find org credentials
+          const { data: brandLink } = await db().from("social_accounts").select("brand_id").eq("id", acct.id).single();
+          if (!brandLink?.brand_id) continue;
+          const { data: brand } = await db().from("brands").select("org_id").eq("id", brandLink.brand_id).single();
+          if (!brand) continue;
+          const { data: creds } = await db().from("platform_credentials")
+            .select("client_id_encrypted, client_secret_encrypted")
+            .eq("org_id", brand.org_id).eq("platform", "snapchat").single();
+          if (!creds) continue;
+
+          const res = await fetchWithTimeout("https://accounts.snapchat.com/login/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              refresh_token: decrypt(acct.refresh_token_encrypted),
+              client_id: decrypt(creds.client_id_encrypted),
+              client_secret: decrypt(creds.client_secret_encrypted),
+            }),
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            await db().from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              refresh_token_encrypted: data.refresh_token ? encrypt(data.refresh_token) : acct.refresh_token_encrypted,
+              token_expires_at: data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : null,
+            }).eq("id", acct.id);
+            console.log(`[token-refresh] Refreshed Snapchat token for ${acct.platform_username}`);
+          }
 
         } else {
           console.warn(`[token-refresh] Unknown platform ${acct.platform} for account ${acct.id} — skipping`);
@@ -1622,7 +2600,7 @@ Average engagement: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) 
         }
 
         // Determine platforms from publish history
-        const platforms = ["instagram", "youtube", "linkedin"];
+        const platforms = ["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"];
         const today = new Date().toISOString().slice(0, 10);
 
         for (const platform of platforms) {
@@ -2216,201 +3194,6 @@ const commentReplyWorker = new Worker(
   { connection: redis }
 );
 
-// ─── Auto-Reply Worker (LLM-powered) ───
-
-async function generateAutoReply(
-  comment: any,
-  postContext: string,
-  brandName: string,
-  tone: string,
-  customInstructions: string,
-  orgId: string,
-  brandId: string
-): Promise<string> {
-  // Multi-level LLM resolution: check brand access → org default
-  const { data: brandAccess } = await db().from("llm_brand_access")
-    .select("provider, is_active")
-    .eq("brand_id", brandId)
-    .eq("is_active", true)
-    .limit(1)
-    .maybeSingle();
-
-  let provider = "openrouter";
-  let apiKey = "";
-  let model = "";
-
-  if (brandAccess) {
-    const providerMap: Record<string, string> = {
-      llm_openrouter: "openrouter", llm_anthropic: "anthropic",
-      llm_openai: "openai", llm_google: "google",
-    };
-    const mappedProvider = providerMap[brandAccess.provider] || brandAccess.provider;
-    const { data: cred } = await db().from("platform_credentials")
-      .select("client_id_encrypted, metadata")
-      .eq("org_id", orgId).eq("platform", brandAccess.provider).single();
-    if (cred) {
-      apiKey = decrypt(cred.client_id_encrypted);
-      provider = mappedProvider;
-      model = (cred.metadata as any)?.default_model || "";
-    }
-  }
-
-  if (!apiKey) {
-    const { data: orgConfig } = await db().from("llm_configurations")
-      .select("provider, api_key_encrypted, base_url, default_model")
-      .eq("org_id", orgId).eq("scope", "org").eq("is_active", true)
-      .limit(1).maybeSingle();
-    if (!orgConfig) throw new Error("No LLM configured for auto-reply");
-    provider = orgConfig.provider;
-    apiKey = decrypt(orgConfig.api_key_encrypted);
-    model = orgConfig.default_model || "";
-  }
-
-  if (!model) {
-    const defaults: Record<string, string> = {
-      openrouter: "anthropic/claude-sonnet-4-20250514",
-      anthropic: "claude-sonnet-4-20250514",
-      openai: "gpt-4o-mini",
-      google: "gemini-2.0-flash",
-    };
-    model = defaults[provider] || "anthropic/claude-sonnet-4-20250514";
-  }
-
-  const systemPrompt = `You are a social media community manager for "${brandName}". Generate a reply to a comment on the brand's post.
-
-Rules:
-- Tone: ${tone}
-- Keep replies concise (1-3 sentences max)
-- Be genuine and natural, not robotic
-- If the comment is a question, answer helpfully
-- If positive, thank them warmly
-- If negative, be empathetic and offer to help
-- Never be defensive or argumentative
-- Match the language of the commenter
-- Do NOT use hashtags in replies
-- Do NOT include quotes or prefixes like "Reply:"
-${customInstructions ? `\nAdditional instructions: ${customInstructions}` : ""}
-
-Respond with ONLY the reply text, nothing else.`;
-
-  const userMessage = `Post context: ${postContext}\n\nComment by @${comment.author_username}: "${comment.comment_text}"\n\nPlatform: ${comment.platform}`;
-
-  let replyText = "";
-
-  if (provider === "openrouter") {
-    const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
-    });
-    const data = await res.json();
-    replyText = data.choices?.[0]?.message?.content || "";
-  } else if (provider === "anthropic") {
-    const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": apiKey, "Content-Type": "application/json", "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, system: systemPrompt, messages: [{ role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
-    });
-    const data = await res.json();
-    replyText = data.content?.[0]?.text || "";
-  } else if (provider === "openai") {
-    const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }], max_tokens: 300, temperature: 0.7 }),
-    });
-    const data = await res.json();
-    replyText = data.choices?.[0]?.message?.content || "";
-  } else if (provider === "google") {
-    const res = await fetchWithTimeout(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }], generationConfig: { maxOutputTokens: 300, temperature: 0.7 } }),
-      }
-    );
-    const data = await res.json();
-    replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  }
-
-  if (!replyText.trim()) throw new Error("LLM returned empty reply");
-  return replyText.trim();
-}
-
-const autoReplyWorker = new Worker(
-  "auto-reply",
-  async () => {
-    const { data: brands } = await db().from("brands")
-      .select("id, org_id, name, settings");
-
-    for (const brand of brands || []) {
-      const settings = (brand.settings || {}) as Record<string, any>;
-      if (!settings.auto_reply_enabled) continue;
-
-      const tone = settings.auto_reply_tone || "friendly";
-      const maxPerHour = settings.auto_reply_max_per_hour || 20;
-      const excludeSentiments = settings.auto_reply_exclude_sentiments || [];
-      const customInstructions = settings.auto_reply_instructions || "";
-
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const { count: recentReplies } = await db().from("comment_replies")
-        .select("id", { count: "exact", head: true })
-        .eq("brand_id", brand.id)
-        .gte("created_at", oneHourAgo);
-
-      if ((recentReplies || 0) >= maxPerHour) {
-        console.log(`[auto-reply] ${brand.name}: rate limit (${recentReplies}/${maxPerHour}/hr)`);
-        continue;
-      }
-
-      const remaining = maxPerHour - (recentReplies || 0);
-
-      const { data: comments } = await db().from("platform_comments")
-        .select("id, platform, platform_comment_id, platform_post_id, author_username, comment_text, sentiment, post_id, social_account_id")
-        .eq("brand_id", brand.id)
-        .eq("status", "unread")
-        .eq("is_hidden", false)
-        .is("platform_parent_comment_id", null)
-        .order("comment_timestamp", { ascending: true })
-        .limit(Math.min(remaining, 10));
-
-      for (const comment of comments || []) {
-        if (comment.sentiment && excludeSentiments.includes(comment.sentiment)) continue;
-
-        try {
-          let postContext = "No additional context";
-          if (comment.post_id) {
-            const { data: post } = await db().from("content_posts")
-              .select("group_id").eq("id", comment.post_id).single();
-            if (post?.group_id) {
-              const { data: group } = await db().from("media_groups")
-                .select("title, caption, description, tags")
-                .eq("id", post.group_id).single();
-              if (group) postContext = `Title: "${group.title}"\nCaption: "${group.caption || ""}"\nTags: ${(group.tags || []).join(", ")}`;
-            }
-          }
-
-          const replyText = await generateAutoReply(comment, postContext, brand.name, tone, customInstructions, brand.org_id, brand.id);
-
-          await db().from("comment_replies").insert({
-            comment_id: comment.id,
-            brand_id: brand.id,
-            replied_by: null,
-            reply_text: replyText,
-            status: "pending",
-          });
-
-          await db().from("platform_comments").update({ status: "replied" }).eq("id", comment.id);
-          console.log(`[auto-reply] ${brand.name}: replied to @${comment.author_username} on ${comment.platform}`);
-          await new Promise(r => setTimeout(r, 1500));
-        } catch (e: any) {
-          console.error(`[auto-reply] Failed for comment ${comment.id}:`, e.message);
-        }
-      }
-    }
-  },
-  { connection: redis }
-);
-
 // ─── Startup ───
 
 async function verifyStartup() {
@@ -2467,11 +3250,6 @@ async function verifyStartup() {
   const commentReplyQueue = new Queue("comment-reply", { connection: redis });
   await commentReplyQueue.add("process-pending", {}, { repeat: { every: 30 * 1000 }, jobId: "comment-reply-cron" });
   console.log("  ✓ Comment reply processing (every 30s)");
-
-  // Auto-reply — every 60 seconds (checks for new unread comments on auto-reply brands)
-  const autoReplyQueue = new Queue("auto-reply", { connection: redis });
-  await autoReplyQueue.add("process-auto", {}, { repeat: { every: 60 * 1000 }, jobId: "auto-reply-cron" });
-  console.log("  ✓ Auto-reply processing (every 60s)");
 }
 
 console.log("Worker starting...");
@@ -2489,7 +3267,6 @@ process.on("SIGTERM", async () => {
   await trendForecastWorker.close();
   await commentSyncWorker.close();
   await commentReplyWorker.close();
-  await autoReplyWorker.close();
   await redis.quit();
   process.exit(0);
 });

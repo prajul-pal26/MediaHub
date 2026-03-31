@@ -4,7 +4,7 @@ import { encrypt, decrypt } from "@/lib/encryption";
 import { TRPCError } from "@trpc/server";
 import { sendTestEmail } from "@/lib/email";
 
-const allPlatformSchema = z.enum(["instagram", "youtube", "linkedin", "google_drive", "email_smtp", "llm_provider", "llm_openrouter", "llm_anthropic", "llm_openai", "llm_google"]);
+const allPlatformSchema = z.enum(["instagram", "youtube", "linkedin", "google_drive", "email_smtp", "llm_provider", "llm_openrouter", "llm_anthropic", "llm_openai", "llm_google", "facebook", "tiktok", "twitter", "snapchat"]);
 
 export const credentialsRouter = router({
   // List all platform credentials for this org
@@ -52,6 +52,10 @@ export const credentialsRouter = router({
         youtube: `${appUrl}/api/callback/youtube`,
         linkedin: `${appUrl}/api/callback/linkedin`,
         google_drive: `${appUrl}/api/callback/google-drive`,
+        facebook: `${appUrl}/api/callback/facebook`,
+        tiktok: `${appUrl}/api/callback/tiktok`,
+        twitter: `${appUrl}/api/callback/twitter`,
+        snapchat: `${appUrl}/api/callback/snapchat`,
         email_smtp: "",
       };
 
@@ -288,6 +292,99 @@ export const credentialsRouter = router({
             return { success: false, error: "Invalid LinkedIn Client ID or Secret" };
           }
           return { success: true, message: "LinkedIn credentials format accepted" };
+        }
+
+        // ─── Facebook ───
+        if (input.platform === "facebook") {
+          // Same as Instagram — verify via client_credentials grant on Graph API
+          const res = await fetch(
+            `https://graph.facebook.com/v19.0/oauth/access_token?` +
+            `client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`
+          );
+          const data = await res.json();
+          if (data.access_token) {
+            return { success: true, message: "Facebook credentials verified — App ID and Secret are valid" };
+          }
+          if (data.error) {
+            return { success: false, error: `Facebook: ${data.error.message || data.error.type || "Invalid credentials"}` };
+          }
+          return { success: false, error: "Could not verify Facebook credentials" };
+        }
+
+        // ─── TikTok ───
+        if (input.platform === "tiktok") {
+          // TikTok token endpoint with dummy code — checks if client_key/secret are valid
+          const res = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_key: clientId,
+              client_secret: clientSecret,
+              grant_type: "authorization_code",
+              code: "test_invalid_code",
+              redirect_uri: cred.redirect_uri || process.env.NEXT_PUBLIC_APP_URL!,
+            }),
+          });
+          const data = await res.json();
+          // "invalid_grant" = credentials valid, code wrong; "invalid_client" = credentials wrong
+          if (data.error === "invalid_grant" || data.data?.error_code === "invalid_grant") {
+            return { success: true, message: "TikTok credentials verified — Client Key and Secret are valid" };
+          }
+          if (data.error === "invalid_client" || data.data?.description?.includes("client")) {
+            return { success: false, error: "Invalid TikTok Client Key or Secret" };
+          }
+          return { success: true, message: "TikTok credentials format accepted" };
+        }
+
+        // ─── Twitter/X ───
+        if (input.platform === "twitter") {
+          // Twitter token endpoint with dummy code — checks if API Key/Secret are valid
+          const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+          const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Authorization": `Basic ${basicAuth}`,
+            },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              code: "test_invalid_code",
+              redirect_uri: cred.redirect_uri || process.env.NEXT_PUBLIC_APP_URL!,
+              code_verifier: "test_verifier",
+            }),
+          });
+          const data = await res.json();
+          if (data.error === "invalid_grant" || data.error === "invalid_request") {
+            return { success: true, message: "X (Twitter) credentials verified — API Key and Secret are valid" };
+          }
+          if (data.error === "invalid_client") {
+            return { success: false, error: "Invalid X (Twitter) API Key or Secret" };
+          }
+          return { success: true, message: "X (Twitter) credentials format accepted" };
+        }
+
+        // ─── Snapchat ───
+        if (input.platform === "snapchat") {
+          // Snapchat token endpoint with dummy code — checks if client_id/secret are valid
+          const res = await fetch("https://accounts.snapchat.com/login/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              code: "test_invalid_code",
+              client_id: clientId,
+              client_secret: clientSecret,
+              redirect_uri: cred.redirect_uri || process.env.NEXT_PUBLIC_APP_URL!,
+            }),
+          });
+          const data = await res.json();
+          if (data.error === "invalid_grant" || data.error === "invalid_request") {
+            return { success: true, message: "Snapchat credentials verified — Client ID and Secret are valid" };
+          }
+          if (data.error === "invalid_client") {
+            return { success: false, error: "Invalid Snapchat Client ID or Secret" };
+          }
+          return { success: true, message: "Snapchat credentials format accepted" };
         }
 
         return { success: false, error: "Unknown platform" };

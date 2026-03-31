@@ -1,7 +1,7 @@
 export interface PlatformRule {
   key: string;
   label: string;
-  platform: "instagram" | "youtube" | "linkedin";
+  platform: "instagram" | "youtube" | "linkedin" | "facebook" | "tiktok" | "twitter" | "snapchat";
   acceptsImage: boolean;
   acceptsVideo: boolean;
   maxDuration: number | null;
@@ -19,6 +19,16 @@ export const PLATFORM_RULES: Record<string, PlatformRule> = {
   yt_short:    { key: "yt_short",    label: "YouTube Short",      platform: "youtube",   acceptsImage: false, acceptsVideo: true,  maxDuration: 60,    targetRatios: ["9:16"],                preferredSize: {w:1080,h:1920} },
   li_post:     { key: "li_post",     label: "LinkedIn Post",      platform: "linkedin",  acceptsImage: true,  acceptsVideo: true,  maxDuration: 600,   targetRatios: ["1:1","191:100","4:5"], preferredSize: {w:1200,h:1200} },
   li_article:  { key: "li_article",  label: "LinkedIn Article",   platform: "linkedin",  acceptsImage: true,  acceptsVideo: false, maxDuration: null,  targetRatios: ["191:100"],             preferredSize: {w:1200,h:627} },
+  // Facebook
+  fb_post:     { key: "fb_post",     label: "Facebook Post",      platform: "facebook",  acceptsImage: true,  acceptsVideo: true,  maxDuration: 7200,  targetRatios: ["1:1","4:5","191:100","16:9"], preferredSize: {w:1080,h:1080} },
+  fb_reel:     { key: "fb_reel",     label: "Facebook Reel",      platform: "facebook",  acceptsImage: false, acceptsVideo: true,  maxDuration: 90,    targetRatios: ["9:16"],                preferredSize: {w:1080,h:1920} },
+  fb_story:    { key: "fb_story",    label: "Facebook Story",     platform: "facebook",  acceptsImage: true,  acceptsVideo: true,  maxDuration: 60,    targetRatios: ["9:16"],                preferredSize: {w:1080,h:1920} },
+  // TikTok
+  tt_video:    { key: "tt_video",    label: "TikTok Video",       platform: "tiktok",    acceptsImage: false, acceptsVideo: true,  maxDuration: 600,   targetRatios: ["9:16"],                preferredSize: {w:1080,h:1920} },
+  // Twitter/X
+  tw_post:     { key: "tw_post",     label: "Tweet",              platform: "twitter",   acceptsImage: true,  acceptsVideo: true,  maxDuration: 140,   targetRatios: ["16:9","1:1"],          preferredSize: {w:1200,h:675} },
+  // Snapchat
+  sc_story:    { key: "sc_story",    label: "Snap Story",         platform: "snapchat",  acceptsImage: true,  acceptsVideo: true,  maxDuration: 60,    targetRatios: ["9:16"],                preferredSize: {w:1080,h:1920} },
 };
 
 export type ResizeOption = "auto_crop" | "blur_bg" | "custom_crop" | "keep_original";
@@ -147,6 +157,25 @@ export function getPlatformMetadata(
       return {
         title: title || caption?.slice(0, 200) || "Untitled",
         description: description || caption || "",
+      };
+    case "fb_post":
+    case "fb_reel":
+      return {
+        caption: captionOverrides?.facebook || fullCaption,
+      };
+    case "fb_story":
+      return { caption: null }; // Stories skip captions
+    case "tt_video":
+      return {
+        caption: captionOverrides?.tiktok || fullCaption,
+      };
+    case "tw_post":
+      return {
+        caption: captionOverrides?.twitter || (caption ? `${caption}\n\n${hashTags}`.trim() : hashTags).slice(0, 280),
+      };
+    case "sc_story":
+      return {
+        caption: captionOverrides?.snapchat || fullCaption,
       };
     default:
       return { caption: fullCaption };

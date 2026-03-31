@@ -272,7 +272,7 @@ export default function AccountsPage() {
             {showAdvanced && activeBrandId && (
               <div className="mt-3 space-y-3 p-4 border rounded-lg bg-muted/30">
                 <div className="grid grid-cols-3 gap-2">
-                  {(["instagram", "youtube", "linkedin"] as const).map((p) => (
+                  {(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"] as const).map((p) => (
                     <Button
                       key={p}
                       size="sm"

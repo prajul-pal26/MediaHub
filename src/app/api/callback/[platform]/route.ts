@@ -28,7 +28,7 @@ export async function GET(
     );
   }
 
-  let state: { brandId: string; orgId: string };
+  let state: { brandId: string; orgId: string; codeVerifier?: string };
   try {
     state = verifyState(stateParam);
   } catch {
@@ -186,6 +186,178 @@ export async function GET(
       platformMetadata = { person_urn: `urn:li:person:${profileData.sub}` };
 
       console.log("[social-callback] LinkedIn connected:", platformUsername);
+    }
+
+    // ─── Facebook ───
+    else if (platform === "facebook") {
+      const tokenRes = await fetch(
+        `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${clientSecret}&code=${code}`
+      );
+      const tokenData = await tokenRes.json();
+
+      if (tokenData.error) {
+        console.error("[social-callback] Facebook token error:", tokenData);
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error?.message || "Facebook auth failed")}`, request.url)
+        );
+      }
+
+      accessToken = tokenData.access_token;
+
+      // Get pages
+      const pagesRes = await fetch(
+        `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
+      );
+      const pagesData = await pagesRes.json();
+      const page = pagesData.data?.[0];
+
+      if (page) {
+        const pageToken = page.access_token;
+        platformUserId = page.id;
+        platformUsername = page.name || "";
+        platformMetadata = { page_id: page.id, page_access_token_encrypted: encrypt(pageToken) };
+        accessToken = pageToken;
+      } else {
+        return NextResponse.redirect(
+          new URL("/accounts?error=No+Facebook+Page+found.+Please+ensure+your+account+has+at+least+one+Page.", request.url)
+        );
+      }
+
+      console.log("[social-callback] Facebook connected:", platformUsername);
+    }
+
+    // ─── TikTok ───
+    else if (platform === "tiktok") {
+      const tokenRes = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_key: clientId,
+          client_secret: clientSecret,
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: redirectUri,
+        }),
+      });
+      const tokenData = await tokenRes.json();
+
+      if (tokenData.error || !tokenData.access_token) {
+        console.error("[social-callback] TikTok token error:", tokenData);
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error || "TikTok auth failed")}`, request.url)
+        );
+      }
+
+      accessToken = tokenData.access_token;
+      refreshToken = tokenData.refresh_token || null;
+      if (tokenData.expires_in) {
+        expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+      }
+
+      // Get user info
+      const userRes = await fetch("https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const userData = await userRes.json();
+      const userInfo = userData.data?.user;
+
+      platformUserId = tokenData.open_id || userInfo?.open_id || "";
+      platformUsername = userInfo?.display_name || "";
+      platformMetadata = { open_id: platformUserId, avatar_url: userInfo?.avatar_url };
+
+      console.log("[social-callback] TikTok connected:", platformUsername);
+    }
+
+    // ─── Twitter/X ───
+    else if (platform === "twitter") {
+      const codeVerifier = state.codeVerifier;
+      if (!codeVerifier) {
+        return NextResponse.redirect(
+          new URL("/accounts?error=missing_code_verifier_for_twitter", request.url)
+        );
+      }
+
+      const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+      const tokenRes = await fetch("https://api.twitter.com/2/oauth2/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Authorization": `Basic ${basicAuth}`,
+        },
+        body: new URLSearchParams({
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: redirectUri,
+          code_verifier: codeVerifier,
+        }),
+      });
+      const tokenData = await tokenRes.json();
+
+      if (tokenData.error) {
+        console.error("[social-callback] Twitter token error:", tokenData);
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+        );
+      }
+
+      accessToken = tokenData.access_token;
+      refreshToken = tokenData.refresh_token || null;
+      if (tokenData.expires_in) {
+        expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+      }
+
+      // Get user info
+      const userRes = await fetch("https://api.twitter.com/2/users/me", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const userData = await userRes.json();
+
+      platformUserId = userData.data?.id || "";
+      platformUsername = userData.data?.username || "";
+      platformMetadata = { twitter_id: platformUserId };
+
+      console.log("[social-callback] Twitter/X connected:", platformUsername);
+    }
+
+    // ─── Snapchat ───
+    else if (platform === "snapchat") {
+      const tokenRes = await fetch("https://accounts.snapchat.com/login/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+        }),
+      });
+      const tokenData = await tokenRes.json();
+
+      if (tokenData.error) {
+        console.error("[social-callback] Snapchat token error:", tokenData);
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+        );
+      }
+
+      accessToken = tokenData.access_token;
+      refreshToken = tokenData.refresh_token || null;
+      if (tokenData.expires_in) {
+        expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+      }
+
+      // Get user info
+      const userRes = await fetch("https://kit.snapchat.com/v1/me", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const userData = await userRes.json();
+
+      platformUserId = userData.data?.me?.externalId || userData.me?.externalId || "";
+      platformUsername = userData.data?.me?.displayName || userData.me?.displayName || "";
+      platformMetadata = { snap_id: platformUserId };
+
+      console.log("[social-callback] Snapchat connected:", platformUsername);
     }
 
     else {

@@ -32,7 +32,7 @@ export interface Brand {
 export interface PlatformCredential {
   id: string;
   org_id: string;
-  platform: "instagram" | "youtube" | "linkedin" | "google_drive";
+  platform: "instagram" | "youtube" | "linkedin" | "google_drive" | "facebook" | "tiktok" | "twitter" | "snapchat";
   client_id: string;
   client_secret_masked: string;
   redirect_uri: string;

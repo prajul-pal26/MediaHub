@@ -2,9 +2,9 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure, assertBrandAccess } from "../index";
 import { TRPCError } from "@trpc/server";
 import { encrypt, decrypt } from "@/lib/encryption";
-import { createHmac } from "crypto";
+import { createHmac, randomBytes, createHash } from "crypto";
 
-const platformSchema = z.enum(["instagram", "youtube", "linkedin"]);
+const platformSchema = z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]);
 
 function getHmacKey(): string {
   const key = process.env.TOKEN_ENCRYPTION_KEY;
@@ -18,7 +18,7 @@ export function signState(state: object): string {
   return Buffer.from(JSON.stringify({ payload, sig })).toString("base64");
 }
 
-export function verifyState(encoded: string): { brandId: string; orgId: string } {
+export function verifyState(encoded: string): { brandId: string; orgId: string; codeVerifier?: string } {
   const { payload, sig } = JSON.parse(Buffer.from(encoded, "base64").toString());
   const expected = createHmac("sha256", getHmacKey()).update(payload).digest("hex");
   if (sig !== expected) throw new Error("Invalid state signature");
@@ -96,6 +96,24 @@ export const socialAccountsRouter = router({
         case "linkedin":
           url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social")}&state=${encodeURIComponent(state)}`;
           break;
+        case "facebook":
+          url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=pages_manage_posts,pages_read_engagement,pages_show_list&response_type=code&state=${encodeURIComponent(state)}`;
+          break;
+        case "tiktok":
+          url = `https://www.tiktok.com/v2/auth/authorize/?client_key=${clientId}&scope=user.info.basic,video.publish,video.upload&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
+          break;
+        case "twitter": {
+          // Twitter OAuth 2.0 with PKCE
+          const codeVerifier = randomBytes(32).toString("base64url");
+          const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+          // Store code_verifier in state metadata so callback can retrieve it
+          const twitterState = signState({ brandId: input.brandId, orgId: profile.org_id, codeVerifier });
+          url = `https://twitter.com/i/oauth2/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("tweet.read tweet.write users.read offline.access")}&state=${encodeURIComponent(twitterState)}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+          break;
+        }
+        case "snapchat":
+          url = `https://accounts.snapchat.com/login/oauth2/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=snapchat-marketing-api&state=${encodeURIComponent(state)}`;
+          break;
       }
 
       return { url };
@@ -158,70 +176,6 @@ export const socialAccountsRouter = router({
       if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Account not found" });
       assertBrandAccess(profile, account.brand_id);
 
-      // Clean up all content tied to this social account before deleting
-
-      // 1. Delete comment replies linked to this account's comments
-      const { data: commentIds } = await db
-        .from("platform_comments")
-        .select("id")
-        .eq("social_account_id", input.accountId);
-      if (commentIds && commentIds.length > 0) {
-        await db
-          .from("comment_replies")
-          .delete()
-          .in("comment_id", commentIds.map((c: any) => c.id));
-      }
-
-      // 2. Delete platform comments from this account
-      await db
-        .from("platform_comments")
-        .delete()
-        .eq("social_account_id", input.accountId);
-
-      // 3. Delete comment sentiments for posts published via this account
-      const { data: jobsWithPosts } = await db
-        .from("publish_jobs")
-        .select("post_id")
-        .eq("social_account_id", input.accountId)
-        .not("post_id", "is", null);
-      const postIds = [...new Set((jobsWithPosts || []).map((j: any) => j.post_id).filter(Boolean))];
-
-      if (postIds.length > 0) {
-        await db
-          .from("comment_sentiments")
-          .delete()
-          .in("post_id", postIds);
-      }
-
-      // 4. Delete post analytics for this account
-      await db
-        .from("post_analytics")
-        .delete()
-        .eq("social_account_id", input.accountId);
-
-      // 5. Delete publish jobs for this account
-      await db
-        .from("publish_jobs")
-        .delete()
-        .eq("social_account_id", input.accountId);
-
-      // 6. Clean up content_posts that have no remaining publish jobs
-      if (postIds.length > 0) {
-        for (const postId of postIds) {
-          const { count } = await db
-            .from("publish_jobs")
-            .select("id", { count: "exact", head: true })
-            .eq("post_id", postId);
-          if (count === 0) {
-            // No jobs left — delete orphaned post and its analytics
-            await db.from("post_analytics").delete().eq("post_id", postId);
-            await db.from("comment_sentiments").delete().eq("post_id", postId);
-            await db.from("content_posts").delete().eq("id", postId);
-          }
-        }
-      }
-
-      // 7. Finally delete the social account itself
       const { error } = await db
         .from("social_accounts")
         .delete()
