@@ -13,7 +13,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useBrand } from "@/lib/hooks/use-brand";
+import { useUser } from "@/lib/hooks/use-user";
 import { trpc } from "@/lib/trpc/client";
+import { toast } from "sonner";
 import {
   BarChart3,
   Eye,
@@ -25,6 +27,7 @@ import {
   Loader2,
   ChevronLeft,
   ChevronRight,
+  Trash2,
 } from "lucide-react";
 
 const platformColors: Record<string, string> = {
@@ -39,9 +42,33 @@ const sourceLabels: Record<string, string> = {
   api: "Imported",
 };
 
+const contentTypeIcons: Record<string, string> = {
+  "Image Post": "🖼️",
+  "Reel": "🎬",
+  "Story": "📱",
+  "Carousel": "🎠",
+  "Video": "🎥",
+  "Short": "⚡",
+  "Post": "📝",
+  "Article": "📄",
+};
+
 export default function PostAnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
+  const { profile } = useUser();
   const [page, setPage] = useState(1);
+  const utils = trpc.useUtils();
+
+  const canDelete = profile && ["super_admin", "agency_admin", "brand_owner"].includes(profile.role);
+
+  const deleteMutation = trpc.analytics.deletePost.useMutation({
+    onSuccess: () => {
+      toast.success("Post deleted");
+      utils.analytics.getPostAnalytics.invalidate();
+      utils.analytics.getSummary.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
 
   const { data: summary, isLoading: summaryLoading } =
     trpc.analytics.getSummary.useQuery(
@@ -175,6 +202,7 @@ export default function PostAnalyticsPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Post</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead>Platform</TableHead>
                     <TableHead>Source</TableHead>
                     <TableHead className="text-right">Views</TableHead>
@@ -183,6 +211,7 @@ export default function PostAnalyticsPage() {
                     <TableHead className="text-right">Shares</TableHead>
                     <TableHead className="text-right">Engagement</TableHead>
                     <TableHead>Published</TableHead>
+                    {canDelete && <TableHead></TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -191,6 +220,12 @@ export default function PostAnalyticsPage() {
                       <TableCell className="max-w-[200px]">
                         <p className="text-sm font-medium truncate">{post.title}</p>
                         <p className="text-xs text-muted-foreground">@{post.account_name}</p>
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-xs flex items-center gap-1">
+                          <span>{contentTypeIcons[post.content_type] || "📋"}</span>
+                          {post.content_type}
+                        </span>
                       </TableCell>
                       <TableCell>
                         <Badge variant="secondary" className={`text-xs ${platformColors[post.platform] || ""}`}>
@@ -216,6 +251,23 @@ export default function PostAnalyticsPage() {
                           ? new Date(post.published_at).toLocaleDateString()
                           : "—"}
                       </TableCell>
+                      {canDelete && (
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
+                            onClick={() => {
+                              if (confirm(`Delete this ${post.content_type}? Analytics data will be permanently removed.`)) {
+                                deleteMutation.mutate({ postId: post.id });
+                              }
+                            }}
+                            disabled={deleteMutation.isPending}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </TableCell>
+                      )}
                     </TableRow>
                   ))}
                 </TableBody>

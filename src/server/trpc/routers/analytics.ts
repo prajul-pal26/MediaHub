@@ -537,6 +537,36 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       return saved;
     }),
 
+  // ━━━ Delete Published Post (brand_owner + admins only) ━━━
+
+  deletePost: protectedProcedure
+    .input(z.object({ postId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      // Get the post and verify access
+      const { data: post } = await db
+        .from("content_posts")
+        .select("id, brand_id, status")
+        .eq("id", input.postId)
+        .single();
+
+      if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
+      assertBrandAccess(profile, post.brand_id);
+
+      // Only brand_owner, agency_admin, super_admin can delete
+      if (!["super_admin", "agency_admin", "brand_owner"].includes(profile.role)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only brand owners and admins can delete published content" });
+      }
+
+      // Delete analytics first, then jobs, then post
+      await db.from("post_analytics").delete().eq("post_id", input.postId);
+      await db.from("publish_jobs").delete().eq("post_id", input.postId);
+      await db.from("content_posts").delete().eq("id", input.postId);
+
+      return { success: true };
+    }),
+
   // ━━━ Post Analytics (individual post stats) ━━━
 
   getPostAnalytics: protectedProcedure
@@ -612,6 +642,19 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
         const totalReach = (analytics || []).reduce((s: number, a: any) => s + (a.reach || 0), 0);
         const totalImpressions = (analytics || []).reduce((s: number, a: any) => s + (a.impressions || 0), 0);
 
+        // Determine content type from action
+        const action = (jobs || [])[0]?.action || "unknown";
+        const contentTypeMap: Record<string, string> = {
+          ig_post: "Image Post",
+          ig_reel: "Reel",
+          ig_story: "Story",
+          ig_carousel: "Carousel",
+          yt_video: "Video",
+          yt_short: "Short",
+          li_post: "Post",
+          li_article: "Article",
+        };
+
         results.push({
           id: post.id,
           title,
@@ -619,7 +662,8 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
           published_at: post.published_at,
           platform: accounts[0]?.platform || "unknown",
           account_name: accounts[0]?.platform_username || "Unknown",
-          action: (jobs || [])[0]?.action || "unknown",
+          action,
+          content_type: contentTypeMap[action] || action,
           views: totalViews,
           likes: totalLikes,
           comments: totalComments,
