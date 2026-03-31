@@ -696,37 +696,463 @@ publishWorker.on("failed", async (job, err) => {
   }
 });
 
+// ─── Platform Analytics Helpers ───
+
+async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId: string) {
+  const { data: creds } = await db().from("platform_credentials")
+    .select("*").eq("org_id", orgId).eq("platform", "youtube").single();
+  if (!creds) return null;
+
+  const oauth2 = new google.auth.OAuth2(
+    decrypt(creds.client_id_encrypted),
+    decrypt(creds.client_secret_encrypted)
+  );
+  oauth2.setCredentials({
+    access_token: decrypt(account.access_token_encrypted),
+    refresh_token: account.refresh_token_encrypted ? decrypt(account.refresh_token_encrypted) : null,
+  });
+
+  const youtube = google.youtube({ version: "v3", auth: oauth2 });
+  const response = await youtube.videos.list({
+    id: [platformPostId],
+    part: ["statistics"],
+  });
+
+  const stats = response.data.items?.[0]?.statistics;
+  if (!stats) return null;
+
+  return {
+    views: parseInt(stats.viewCount || "0"),
+    likes: parseInt(stats.likeCount || "0"),
+    comments: parseInt(stats.commentCount || "0"),
+    shares: 0, // YouTube doesn't expose shares
+  };
+}
+
+async function fetchInstagramAnalytics(account: any, platformPostId: string) {
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) return null;
+
+  // Get post insights
+  const insightsRes = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=impressions,reach,engagement,saved&access_token=${pageToken}`
+  );
+  const insightsData = await insightsRes.json();
+
+  // Also get basic metrics
+  const mediaRes = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${platformPostId}?fields=like_count,comments_count,timestamp&access_token=${pageToken}`
+  );
+  const mediaData = await mediaRes.json();
+
+  const insights = insightsData.data || [];
+  const getMetric = (name: string) => insights.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+
+  return {
+    views: getMetric("impressions"),
+    likes: mediaData.like_count || 0,
+    comments: mediaData.comments_count || 0,
+    shares: 0,
+    saves: getMetric("saved"),
+    reach: getMetric("reach"),
+    impressions: getMetric("impressions"),
+    engagement_rate: getMetric("engagement"),
+  };
+}
+
+async function fetchLinkedInAnalytics(account: any, platformPostId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(platformPostId)}/statisticsCount`,
+    {
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "LinkedIn-Version": "202401",
+      },
+    }
+  );
+
+  if (!res.ok) return null;
+  const data = await res.json();
+
+  return {
+    views: data.impressionCount || 0,
+    likes: data.likeCount || 0,
+    comments: data.commentCount || 0,
+    shares: data.shareCount || 0,
+  };
+}
+
 // ─── Analytics Fetch Worker ───
 
 const analyticsWorker = new Worker(
   "analytics-fetch",
   async () => {
-    console.log("[analytics] Fetching analytics for published posts...");
+    console.log("[analytics] Fetching real analytics for published posts...");
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: posts } = await db().from("content_posts").select("id, publish_jobs(id, social_account_id, platform_post_id, action, status)").eq("status", "published").gte("published_at", thirtyDaysAgo);
+
+    const { data: posts } = await db().from("content_posts")
+      .select("id, brand_id, publish_jobs(id, social_account_id, platform_post_id, action, status)")
+      .eq("status", "published")
+      .gte("published_at", thirtyDaysAgo);
 
     let fetched = 0;
+    let errors = 0;
+
     for (const post of posts || []) {
       for (const pj of post.publish_jobs || []) {
         if (pj.status !== "completed" || !pj.platform_post_id) continue;
-        await db().from("post_analytics").insert({
-          post_id: post.id,
-          social_account_id: pj.social_account_id,
-          views: Math.floor(Math.random() * 1000),
-          likes: Math.floor(Math.random() * 100),
-          comments: Math.floor(Math.random() * 20),
-          shares: Math.floor(Math.random() * 10),
-          fetched_at: new Date().toISOString(),
-        });
-        fetched++;
+
+        try {
+          // Get the social account
+          const { data: account } = await db().from("social_accounts")
+            .select("*").eq("id", pj.social_account_id).single();
+          if (!account) continue;
+
+          // Get brand's org_id
+          const { data: brand } = await db().from("brands")
+            .select("org_id").eq("id", post.brand_id).single();
+          if (!brand) continue;
+
+          let analytics: Record<string, number> | null = null;
+
+          if (pj.action.startsWith("yt_")) {
+            analytics = await fetchYouTubeAnalytics(account, pj.platform_post_id, brand.org_id);
+          } else if (pj.action.startsWith("ig_")) {
+            analytics = await fetchInstagramAnalytics(account, pj.platform_post_id);
+          } else if (pj.action.startsWith("li_")) {
+            analytics = await fetchLinkedInAnalytics(account, pj.platform_post_id);
+          }
+
+          if (analytics) {
+            // Upsert analytics (update if exists, insert if not)
+            const { data: existing } = await db().from("post_analytics")
+              .select("id")
+              .eq("post_id", post.id)
+              .eq("social_account_id", pj.social_account_id)
+              .maybeSingle();
+
+            if (existing) {
+              await db().from("post_analytics").update({
+                ...analytics,
+                fetched_at: new Date().toISOString(),
+              }).eq("id", existing.id);
+            } else {
+              await db().from("post_analytics").insert({
+                post_id: post.id,
+                social_account_id: pj.social_account_id,
+                ...analytics,
+                fetched_at: new Date().toISOString(),
+              });
+            }
+            fetched++;
+          }
+        } catch (e: any) {
+          console.error(`[analytics] Error fetching for job ${pj.id}:`, e.message);
+          errors++;
+        }
       }
     }
-    console.log(`[analytics] Fetched analytics for ${fetched} jobs`);
 
-    // After fetching analytics, update prediction accuracy
+    console.log(`[analytics] Done: ${fetched} fetched, ${errors} errors`);
     await updatePredictionAccuracy();
   },
   { connection: redis }
+);
+
+// ─── Historical Import Helpers ───
+
+async function importInstagramHistory(account: any, brandId: string, _orgId: string): Promise<number> {
+  const igUserId = account.platform_user_id;
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) throw new Error("No page access token");
+
+  console.log(`[historical] Importing Instagram history for @${account.platform_username}...`);
+
+  let url: string | null = `https://graph.facebook.com/v19.0/${igUserId}/media?fields=id,caption,media_type,media_url,thumbnail_url,timestamp,like_count,comments_count,permalink&limit=50&access_token=${pageToken}`;
+  let totalImported = 0;
+
+  while (url && totalImported < 500) {
+    const res = await fetchWithTimeout(url, {}, 30000);
+    const data = await res.json();
+
+    if (data.error) {
+      console.error("[historical] Instagram API error:", data.error.message);
+      break;
+    }
+
+    for (const post of data.data || []) {
+      try {
+        // Create media group for this historical post
+        const { data: group } = await db().from("media_groups").insert({
+          brand_id: brandId,
+          title: (post.caption || "").slice(0, 80) || "Imported post",
+          caption: post.caption || "",
+          variant_count: 1,
+          status: "published",
+          notes: "Imported from Instagram",
+        }).select().single();
+
+        if (!group) continue;
+
+        // Create content post
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: group.id,
+          brand_id: brandId,
+          status: "published",
+          published_at: post.timestamp,
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        // Create a placeholder media asset for the FK constraint on publish_jobs
+        const { data: placeholderAsset } = await db().from("media_assets").insert({
+          group_id: group.id,
+          drive_file_id: `imported_ig_${post.id}`,
+          file_name: post.media_type === "VIDEO" ? "imported_video.mp4" : "imported_image.jpg",
+          file_type: post.media_type === "VIDEO" ? "video/mp4" : "image/jpeg",
+          metadata: { imported: true, permalink: post.permalink },
+          sort_order: 0,
+        }).select().single();
+
+        if (!placeholderAsset) continue;
+
+        // Create publish job record
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: placeholderAsset.id,
+          social_account_id: account.id,
+          action: post.media_type === "VIDEO" ? "ig_reel" : "ig_post",
+          status: "completed",
+          platform_post_id: post.id,
+          completed_at: post.timestamp,
+        });
+
+        // Fetch insights for this post
+        let insights: Record<string, number> = {};
+        try {
+          const insightsRes = await fetchWithTimeout(
+            `https://graph.facebook.com/v19.0/${post.id}/insights?metric=impressions,reach,engagement,saved&access_token=${pageToken}`,
+            {}, 10000
+          );
+          const insightsData = await insightsRes.json();
+          const metrics = insightsData.data || [];
+          const getMetric = (name: string) => metrics.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+          insights = {
+            reach: getMetric("reach"),
+            impressions: getMetric("impressions"),
+            engagement_rate: getMetric("engagement"),
+            saves: getMetric("saved"),
+          };
+        } catch {
+          // Insights may not be available for old posts
+        }
+
+        // Save analytics
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          views: insights.impressions || 0,
+          likes: post.like_count || 0,
+          comments: post.comments_count || 0,
+          shares: 0,
+          saves: insights.saves || 0,
+          reach: insights.reach || 0,
+          impressions: insights.impressions || 0,
+          engagement_rate: insights.engagement_rate || 0,
+          platform_specific: { permalink: post.permalink, media_type: post.media_type },
+          fetched_at: new Date().toISOString(),
+        });
+
+        totalImported++;
+
+        // Rate limiting — Instagram API has ~200 calls/hour per user
+        if (totalImported % 10 === 0) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (e: any) {
+        console.error(`[historical] Error importing IG post ${post.id}:`, e.message);
+      }
+    }
+
+    // Pagination
+    url = data.paging?.next || null;
+  }
+
+  console.log(`[historical] Instagram import complete: ${totalImported} posts`);
+  return totalImported;
+}
+
+async function importYouTubeHistory(account: any, brandId: string, orgId: string): Promise<number> {
+  const { data: creds } = await db().from("platform_credentials")
+    .select("*").eq("org_id", orgId).eq("platform", "youtube").single();
+  if (!creds) throw new Error("YouTube credentials not found");
+
+  const oauth2 = new google.auth.OAuth2(
+    decrypt(creds.client_id_encrypted),
+    decrypt(creds.client_secret_encrypted)
+  );
+  oauth2.setCredentials({
+    access_token: decrypt(account.access_token_encrypted),
+    refresh_token: account.refresh_token_encrypted ? decrypt(account.refresh_token_encrypted) : null,
+  });
+
+  const youtube = google.youtube({ version: "v3", auth: oauth2 });
+
+  let pageToken: string | undefined;
+  let totalImported = 0;
+
+  do {
+    const searchRes = await youtube.search.list({
+      channelId: account.platform_user_id,
+      type: ["video"],
+      part: ["snippet"],
+      maxResults: 50,
+      pageToken,
+      order: "date",
+    });
+
+    const videoIds = (searchRes.data.items || [])
+      .map((item) => item.id?.videoId)
+      .filter((id): id is string => Boolean(id));
+
+    if (videoIds.length === 0) break;
+
+    // Get statistics for all videos in batch
+    const statsRes = await youtube.videos.list({
+      id: videoIds,
+      part: ["statistics", "snippet", "contentDetails"],
+    });
+
+    for (const video of statsRes.data.items || []) {
+      try {
+        const stats = video.statistics || {};
+        const snippet = video.snippet || {};
+
+        // Create media group
+        const { data: group } = await db().from("media_groups").insert({
+          brand_id: brandId,
+          title: snippet.title || "Imported video",
+          caption: snippet.description || "",
+          tags: snippet.tags || [],
+          variant_count: 1,
+          status: "published",
+          notes: "Imported from YouTube",
+        }).select().single();
+
+        if (!group) continue;
+
+        // Create content post
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: group.id,
+          brand_id: brandId,
+          status: "published",
+          published_at: snippet.publishedAt,
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        // Determine if short
+        const duration = video.contentDetails?.duration || "";
+        const secondsMatch = duration.match(/PT(?:(\d+)M)?(\d+)S/);
+        const totalSeconds = secondsMatch
+          ? (parseInt(secondsMatch[1] || "0") * 60) + parseInt(secondsMatch[2] || "0")
+          : 999;
+        const isShort = totalSeconds <= 60 && !duration.includes("H");
+
+        // Create a placeholder media asset for the FK constraint
+        const { data: placeholderAsset } = await db().from("media_assets").insert({
+          group_id: group.id,
+          drive_file_id: `imported_yt_${video.id}`,
+          file_name: `${(snippet.title || "video").slice(0, 60)}.mp4`,
+          file_type: "video/mp4",
+          duration_seconds: totalSeconds < 999 ? totalSeconds : null,
+          metadata: { imported: true, video_id: video.id },
+          sort_order: 0,
+        }).select().single();
+
+        if (!placeholderAsset) continue;
+
+        // Create publish job
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: placeholderAsset.id,
+          social_account_id: account.id,
+          action: isShort ? "yt_short" : "yt_video",
+          status: "completed",
+          platform_post_id: video.id,
+          completed_at: snippet.publishedAt,
+        });
+
+        // Save analytics
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          views: parseInt(stats.viewCount || "0"),
+          likes: parseInt(stats.likeCount || "0"),
+          comments: parseInt(stats.commentCount || "0"),
+          shares: 0,
+          platform_specific: { video_id: video.id, duration: video.contentDetails?.duration },
+          fetched_at: new Date().toISOString(),
+        });
+
+        totalImported++;
+      } catch (e: any) {
+        console.error(`[historical] Error importing YT video ${video.id}:`, e.message);
+      }
+    }
+
+    pageToken = searchRes.data.nextPageToken || undefined;
+
+    // Rate limiting
+    if (totalImported % 50 === 0 && totalImported > 0) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } while (pageToken && totalImported < 500);
+
+  console.log(`[historical] YouTube import complete: ${totalImported} videos`);
+  return totalImported;
+}
+
+// ─── Historical Import Worker ───
+
+const historicalWorker = new Worker(
+  "historical-import",
+  async (job) => {
+    const { accountId, brandId, orgId, platform } = job.data as {
+      accountId: string;
+      brandId: string;
+      orgId: string;
+      platform: string;
+    };
+    console.log(`[historical] Starting ${platform} import for brand ${brandId}...`);
+
+    const { data: account } = await db().from("social_accounts")
+      .select("*").eq("id", accountId).single();
+    if (!account) throw new Error("Account not found");
+
+    let imported = 0;
+
+    if (platform === "instagram") {
+      imported = await importInstagramHistory(account, brandId, orgId);
+    } else if (platform === "youtube") {
+      imported = await importYouTubeHistory(account, brandId, orgId);
+    } else if (platform === "linkedin") {
+      // LinkedIn historical import is limited — API doesn't support fetching past shares easily
+      console.log("[historical] LinkedIn historical import not available (API limitation)");
+      imported = 0;
+    }
+
+    console.log(`[historical] Import complete: ${imported} posts imported for ${platform}`);
+  },
+  { connection: redis, concurrency: 1 }
 );
 
 // ─── Token Refresh Worker ───
@@ -1335,6 +1761,7 @@ process.on("SIGTERM", async () => {
   console.log("Shutting down...");
   await publishWorker.close();
   await analyticsWorker.close();
+  await historicalWorker.close();
   await tokenWorker.close();
   await categorizeWorker.close();
   await trendForecastWorker.close();

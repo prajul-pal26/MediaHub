@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/supabase/db";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { verifyState } from "@/server/trpc/routers/social-accounts";
+import { getHistoricalImportQueue } from "@/server/queue/queues";
 
 export async function GET(
   request: NextRequest,
@@ -213,13 +214,28 @@ export async function GET(
       }).eq("id", existing.id);
 
       console.log("[social-callback] Updated existing account:", platformUsername);
+
+      // Queue historical import for reconnected account
+      try {
+        const queue = getHistoricalImportQueue();
+        await queue.add(`historical-${platform}-${state.brandId}`, {
+          accountId: existing.id,
+          brandId: state.brandId,
+          orgId: state.orgId,
+          platform,
+        });
+        console.log(`[social-callback] Queued historical import for ${platform}`);
+      } catch (e: any) {
+        console.error("[social-callback] Failed to queue historical import:", e.message);
+      }
+
       return NextResponse.redirect(
         new URL(`/accounts?connected=${platform}&updated=true`, request.url)
       );
     }
 
     // Save new account
-    const { error: insertError } = await db.from("social_accounts").insert({
+    const { data: newAccount, error: insertError } = await db.from("social_accounts").insert({
       brand_id: state.brandId,
       platform,
       platform_user_id: platformUserId,
@@ -230,13 +246,27 @@ export async function GET(
       connection_method: "oauth",
       platform_metadata: platformMetadata,
       is_active: true,
-    });
+    }).select("id").single();
 
     if (insertError) {
       console.error("[social-callback] DB insert error:", insertError);
       return NextResponse.redirect(
         new URL(`/accounts?error=${encodeURIComponent(insertError.message)}`, request.url)
       );
+    }
+
+    // Queue historical import for newly connected account
+    try {
+      const queue = getHistoricalImportQueue();
+      await queue.add(`historical-${platform}-${state.brandId}`, {
+        accountId: newAccount.id,
+        brandId: state.brandId,
+        orgId: state.orgId,
+        platform,
+      });
+      console.log(`[social-callback] Queued historical import for ${platform}`);
+    } catch (e: any) {
+      console.error("[social-callback] Failed to queue historical import:", e.message);
     }
 
     return NextResponse.redirect(

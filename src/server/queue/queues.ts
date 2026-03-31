@@ -3,6 +3,7 @@ import { getQueueConnection } from "./connection";
 
 let _publishQueue: Queue | null = null;
 let _analyticsQueue: Queue | null = null;
+let _historicalImportQueue: Queue | null = null;
 
 export function getPublishQueue(): Queue {
   if (!_publishQueue) {
@@ -26,4 +27,13 @@ export function getAnalyticsQueue(): Queue {
     });
   }
   return _analyticsQueue;
+}
+
+export function getHistoricalImportQueue(): Queue {
+  if (!_historicalImportQueue) {
+    _historicalImportQueue = new Queue("historical-import", {
+      connection: getQueueConnection(),
+    });
+  }
+  return _historicalImportQueue;
 }
