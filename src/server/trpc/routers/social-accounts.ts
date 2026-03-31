@@ -176,6 +176,58 @@ export const socialAccountsRouter = router({
       if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Account not found" });
       assertBrandAccess(profile, account.brand_id);
 
+      // ── Cascade-delete all content tied to this social account ──
+
+      // 1. Delete replies on comments from this account
+      const { data: commentRows } = await db
+        .from("platform_comments")
+        .select("id")
+        .eq("social_account_id", input.accountId);
+      if (commentRows && commentRows.length > 0) {
+        await db.from("comment_replies").delete()
+          .in("comment_id", commentRows.map((c: any) => c.id));
+      }
+
+      // 2. Delete platform comments
+      await db.from("platform_comments").delete()
+        .eq("social_account_id", input.accountId);
+
+      // 3. Collect post IDs from publish jobs for this account
+      const { data: jobRows } = await db
+        .from("publish_jobs")
+        .select("post_id")
+        .eq("social_account_id", input.accountId)
+        .not("post_id", "is", null);
+      const postIds = [...new Set((jobRows || []).map((j: any) => j.post_id).filter(Boolean))];
+
+      // 4. Delete comment sentiments for those posts
+      if (postIds.length > 0) {
+        await db.from("comment_sentiments").delete().in("post_id", postIds);
+      }
+
+      // 5. Delete post analytics for this account
+      await db.from("post_analytics").delete()
+        .eq("social_account_id", input.accountId);
+
+      // 6. Delete publish jobs for this account
+      await db.from("publish_jobs").delete()
+        .eq("social_account_id", input.accountId);
+
+      // 7. Remove orphaned content_posts that have zero remaining jobs
+      if (postIds.length > 0) {
+        for (const pid of postIds) {
+          const { count } = await db.from("publish_jobs")
+            .select("id", { count: "exact", head: true })
+            .eq("post_id", pid);
+          if (count === 0) {
+            await db.from("post_analytics").delete().eq("post_id", pid);
+            await db.from("comment_sentiments").delete().eq("post_id", pid);
+            await db.from("content_posts").delete().eq("id", pid);
+          }
+        }
+      }
+
+      // 8. Delete the social account itself
       const { error } = await db
         .from("social_accounts")
         .delete()
