@@ -62,6 +62,10 @@ const PlatformIcon = ({ platform, className }: { platform: string; className?: s
     case "instagram": return <Camera className={cn("text-pink-500", className)} />;
     case "youtube": return <Play className={cn("text-red-500", className)} />;
     case "linkedin": return <Briefcase className={cn("text-blue-600", className)} />;
+    case "facebook": return <MessageCircle className={cn("text-blue-500", className)} />;
+    case "tiktok": return <Play className={cn("text-gray-900 dark:text-white", className)} />;
+    case "twitter": return <MessageCircle className={cn("text-sky-500", className)} />;
+    case "snapchat": return <Camera className={cn("text-yellow-400", className)} />;
     default: return <MessageCircle className={className} />;
   }
 };
@@ -399,6 +403,14 @@ export function ThreadsInbox() {
     },
   });
 
+  const generateReplyMutation = trpc.threads.generateReply.useMutation({
+    onSuccess: (data) => {
+      setDraftReply(data.generatedText);
+      toast.success("AI reply generated - review and edit before sending");
+    },
+    onError: (err) => toast.error(`AI generation failed: ${err.message}`),
+  });
+
   const syncMutation = trpc.threads.syncComments.useMutation({
     onSuccess: () => {
       toast.success("Comment sync started");
@@ -717,6 +729,10 @@ export function ThreadsInbox() {
               <SelectItem value="instagram">Instagram</SelectItem>
               <SelectItem value="youtube">YouTube</SelectItem>
               <SelectItem value="linkedin">LinkedIn</SelectItem>
+              <SelectItem value="facebook">Facebook</SelectItem>
+              <SelectItem value="tiktok">TikTok</SelectItem>
+              <SelectItem value="twitter">Twitter</SelectItem>
+              <SelectItem value="snapchat">Snapchat</SelectItem>
             </SelectContent>
           </Select>
           <Select value={sentiment} onValueChange={(v) => { if (v) { setSentiment(v); setPage(1); } }}>
@@ -986,12 +1002,29 @@ export function ThreadsInbox() {
                       replyMutation.isPending ||
                       bulkReplyMutation.isPending
                     }
-                    className="h-full"
+                    className="flex-1"
                   >
                     {replyMutation.isPending || bulkReplyMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <Send className="h-4 w-4" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      if (activeCommentId) {
+                        generateReplyMutation.mutate({ commentId: activeCommentId });
+                      }
+                    }}
+                    disabled={!activeCommentId || generateReplyMutation.isPending}
+                    title="Generate reply with AI"
+                    className="flex-1"
+                  >
+                    {generateReplyMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Bot className="h-4 w-4" />
                     )}
                   </Button>
                 </div>

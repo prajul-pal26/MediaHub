@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { router, protectedProcedure, assertBrandAccess } from "../index";
 import { TRPCError } from "@trpc/server";
+import { generateCommentReply } from "@/server/services/threads/reply-generator";
 
 export const threadsRouter = router({
   // ━━━ List Comments (Thread Inbox) ━━━
@@ -8,7 +9,7 @@ export const threadsRouter = router({
     .input(
       z.object({
         brandId: z.string().uuid(),
-        platform: z.enum(["instagram", "youtube", "linkedin", "all"]).default("all"),
+        platform: z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat", "all"]).default("all"),
         status: z.enum(["unread", "read", "replied", "archived", "flagged", "all"]).default("all"),
         sentiment: z.enum(["positive", "negative", "neutral", "question", "all"]).default("all"),
         search: z.string().optional(),
@@ -477,6 +478,79 @@ export const threadsRouter = router({
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
       return { success: true, settings: updatedSettings };
+    }),
+
+  // ━━━ Generate AI Reply ━━━
+  generateReply: protectedProcedure
+    .input(
+      z.object({
+        commentId: z.string().uuid(),
+        tone: z.string().optional(),
+        customInstructions: z.string().max(500).optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      // Fetch comment with linked data
+      const { data: comment, error } = await db
+        .from("platform_comments")
+        .select("id, brand_id, platform, comment_text, author_username, sentiment, post_id, social_account_id")
+        .eq("id", input.commentId)
+        .single();
+
+      if (error || !comment)
+        throw new TRPCError({ code: "NOT_FOUND", message: "Comment not found" });
+
+      assertBrandAccess(profile, comment.brand_id);
+
+      // Get brand name
+      const { data: brand } = await db
+        .from("brands")
+        .select("name, org_id, settings")
+        .eq("id", comment.brand_id)
+        .single();
+
+      if (!brand)
+        throw new TRPCError({ code: "NOT_FOUND", message: "Brand not found" });
+
+      // Get post caption if linked
+      let postCaption: string | undefined;
+      if (comment.post_id) {
+        const { data: post } = await db
+          .from("content_posts")
+          .select("group_id")
+          .eq("id", comment.post_id)
+          .single();
+        if (post?.group_id) {
+          const { data: group } = await db
+            .from("media_groups")
+            .select("caption")
+            .eq("id", post.group_id)
+            .single();
+          postCaption = group?.caption || undefined;
+        }
+      }
+
+      const settings = (brand.settings || {}) as Record<string, any>;
+
+      const generatedText = await generateCommentReply({
+        comment: {
+          text: comment.comment_text,
+          author: comment.author_username,
+          platform: comment.platform,
+          sentiment: comment.sentiment,
+        },
+        postCaption,
+        brandName: brand.name,
+        tone: input.tone || settings.auto_reply_tone || "friendly",
+        customInstructions: input.customInstructions || settings.auto_reply_instructions || undefined,
+        userId: profile.id,
+        orgId: brand.org_id,
+        brandId: comment.brand_id,
+      });
+
+      return { generatedText };
     }),
 
   // ━━━ Trigger Manual Comment Sync ━━━

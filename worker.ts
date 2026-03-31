@@ -2977,6 +2977,257 @@ async function syncLinkedInComments(account: any, brandId: string) {
   return synced;
 }
 
+async function syncFacebookComments(account: any, brandId: string) {
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) return 0;
+
+  const pageId = account.platform_user_id;
+  let synced = 0;
+
+  // Get recent published posts
+  const postsRes = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${pageId}/published_posts?fields=id,message,created_time&limit=25&access_token=${pageToken}`
+  );
+  const postsData = await postsRes.json();
+  if (postsData.error) {
+    console.error(`[comment-sync] FB posts list error: ${postsData.error.message}`);
+    return 0;
+  }
+
+  for (const post of postsData.data || []) {
+    try {
+      const commentsRes = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${post.id}/comments?fields=id,message,from,created_time,like_count&limit=50&access_token=${pageToken}`
+      );
+      const commentsData = await commentsRes.json();
+      if (commentsData.error) continue;
+
+      // Find the content_post linked to this platform_post_id
+      const { data: publishJob } = await db().from("publish_jobs")
+        .select("id, post_id")
+        .eq("platform_post_id", post.id)
+        .eq("social_account_id", account.id)
+        .limit(1)
+        .maybeSingle();
+
+      for (const comment of commentsData.data || []) {
+        const { error: upsertErr } = await db().from("platform_comments")
+          .upsert({
+            brand_id: brandId,
+            post_id: publishJob?.post_id || null,
+            publish_job_id: publishJob?.id || null,
+            social_account_id: account.id,
+            platform: "facebook",
+            platform_comment_id: comment.id,
+            platform_post_id: post.id,
+            author_username: comment.from?.name || "Facebook User",
+            author_profile_url: comment.from?.id ? `https://facebook.com/${comment.from.id}` : null,
+            author_avatar_url: null,
+            comment_text: comment.message || "",
+            comment_timestamp: comment.created_time || new Date().toISOString(),
+            like_count: comment.like_count || 0,
+            synced_at: new Date().toISOString(),
+          }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+        if (!upsertErr) synced++;
+      }
+
+      // Rate limit
+      if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
+    } catch (e: any) {
+      console.error(`[comment-sync] FB comment fetch error for post ${post.id}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+async function syncTikTokComments(account: any, brandId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+  let synced = 0;
+
+  // Get recent videos
+  const videosRes = await fetchWithTimeout(
+    `https://open.tiktokapis.com/v2/video/list/`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        max_count: 20,
+      }),
+    }
+  );
+  const videosData = await videosRes.json();
+  if (videosData.error?.code) {
+    console.error(`[comment-sync] TikTok video list error: ${videosData.error.message}`);
+    return 0;
+  }
+
+  for (const video of videosData.data?.videos || []) {
+    const videoId = video.id;
+    if (!videoId) continue;
+
+    try {
+      let cursor = 0;
+      let hasMore = true;
+
+      while (hasMore && synced < 500) {
+        const commentsRes = await fetchWithTimeout(
+          `https://open.tiktokapis.com/v2/comment/list/`,
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              video_id: videoId,
+              max_count: 50,
+              cursor,
+            }),
+          }
+        );
+        const commentsData = await commentsRes.json();
+        if (commentsData.error?.code) break;
+
+        // Find the content_post linked to this platform_post_id
+        const { data: publishJob } = await db().from("publish_jobs")
+          .select("id, post_id")
+          .eq("platform_post_id", videoId)
+          .eq("social_account_id", account.id)
+          .limit(1)
+          .maybeSingle();
+
+        for (const comment of commentsData.data?.comments || []) {
+          const { error: upsertErr } = await db().from("platform_comments")
+            .upsert({
+              brand_id: brandId,
+              post_id: publishJob?.post_id || null,
+              publish_job_id: publishJob?.id || null,
+              social_account_id: account.id,
+              platform: "tiktok",
+              platform_comment_id: comment.id || `tt_${videoId}_${synced}`,
+              platform_post_id: videoId,
+              platform_parent_comment_id: comment.parent_comment_id || null,
+              author_username: comment.user?.display_name || comment.user?.unique_id || "TikTok User",
+              author_avatar_url: comment.user?.avatar_url || null,
+              comment_text: comment.text || "",
+              comment_timestamp: comment.create_time
+                ? new Date(comment.create_time * 1000).toISOString()
+                : new Date().toISOString(),
+              like_count: comment.likes || 0,
+              synced_at: new Date().toISOString(),
+            }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+          if (!upsertErr) synced++;
+        }
+
+        hasMore = commentsData.data?.has_more || false;
+        cursor = commentsData.data?.cursor || 0;
+      }
+
+      // Rate limit
+      if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
+    } catch (e: any) {
+      console.error(`[comment-sync] TikTok comment fetch error for video ${videoId}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+async function syncTwitterComments(account: any, brandId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const userId = account.platform_user_id;
+  let synced = 0;
+
+  // Get recent tweets
+  const tweetsRes = await fetchWithTimeout(
+    `https://api.twitter.com/2/users/${userId}/tweets?max_results=25&tweet.fields=created_at,conversation_id`,
+    {
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+      },
+    }
+  );
+  const tweetsData = await tweetsRes.json();
+  if (tweetsData.errors) {
+    console.error(`[comment-sync] Twitter tweets list error: ${tweetsData.errors[0]?.message}`);
+    return 0;
+  }
+
+  for (const tweet of tweetsData.data || []) {
+    const tweetId = tweet.id;
+    if (!tweetId) continue;
+
+    try {
+      // Search for replies to this tweet
+      const repliesRes = await fetchWithTimeout(
+        `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${tweetId}&tweet.fields=created_at,author_id,in_reply_to_user_id,public_metrics&expansions=author_id&user.fields=username,profile_image_url&max_results=100`,
+        {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+          },
+        }
+      );
+      const repliesData = await repliesRes.json();
+      if (repliesData.errors) continue;
+
+      // Build user lookup map from includes
+      const userMap: Record<string, { username: string; profile_image_url?: string }> = {};
+      for (const user of repliesData.includes?.users || []) {
+        userMap[user.id] = { username: user.username, profile_image_url: user.profile_image_url };
+      }
+
+      // Find the content_post linked to this platform_post_id
+      const { data: publishJob } = await db().from("publish_jobs")
+        .select("id, post_id")
+        .eq("platform_post_id", tweetId)
+        .eq("social_account_id", account.id)
+        .limit(1)
+        .maybeSingle();
+
+      for (const reply of repliesData.data || []) {
+        // Skip the original tweet itself
+        if (reply.id === tweetId) continue;
+
+        const author = userMap[reply.author_id] || {};
+        const { error: upsertErr } = await db().from("platform_comments")
+          .upsert({
+            brand_id: brandId,
+            post_id: publishJob?.post_id || null,
+            publish_job_id: publishJob?.id || null,
+            social_account_id: account.id,
+            platform: "twitter",
+            platform_comment_id: reply.id,
+            platform_post_id: tweetId,
+            author_username: author.username || `user_${reply.author_id}`,
+            author_avatar_url: author.profile_image_url || null,
+            comment_text: reply.text || "",
+            comment_timestamp: reply.created_at || new Date().toISOString(),
+            like_count: reply.public_metrics?.like_count || 0,
+            reply_count: reply.public_metrics?.reply_count || 0,
+            synced_at: new Date().toISOString(),
+          }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+        if (!upsertErr) synced++;
+      }
+
+      // Rate limit
+      if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
+    } catch (e: any) {
+      console.error(`[comment-sync] Twitter reply fetch error for tweet ${tweetId}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
 // ─── Comment Sync Worker ───
 
 const commentSyncWorker = new Worker(
@@ -3014,6 +3265,12 @@ const commentSyncWorker = new Worker(
             count = await syncYouTubeComments(account, brand.id, brand.org_id);
           } else if (account.platform === "linkedin") {
             count = await syncLinkedInComments(account, brand.id);
+          } else if (account.platform === "facebook") {
+            count = await syncFacebookComments(account, brand.id);
+          } else if (account.platform === "tiktok") {
+            count = await syncTikTokComments(account, brand.id);
+          } else if (account.platform === "twitter") {
+            count = await syncTwitterComments(account, brand.id);
           }
           totalSynced += count;
           console.log(`[comment-sync] ${account.platform}/@${account.platform_username}: ${count} comments synced`);
@@ -3123,6 +3380,90 @@ async function postLinkedInReply(comment: any, replyText: string, account: any):
   return data.id || data["$URN"] || `li_reply_${Date.now()}`;
 }
 
+async function postFacebookReply(comment: any, replyText: string, account: any): Promise<string> {
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) throw new Error("No Facebook page access token");
+
+  const res = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${comment.platform_comment_id}/comments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: replyText,
+        access_token: pageToken,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Facebook reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.id || `fb_reply_${Date.now()}`;
+}
+
+async function postTikTokReply(comment: any, replyText: string, account: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    `https://open.tiktokapis.com/v2/comment/reply/`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        video_id: comment.platform_post_id,
+        comment_id: comment.platform_comment_id,
+        text: replyText,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`TikTok reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.data?.comment_id || `tt_reply_${Date.now()}`;
+}
+
+async function postTwitterReply(comment: any, replyText: string, account: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    `https://api.twitter.com/2/tweets`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: replyText,
+        reply: {
+          in_reply_to_tweet_id: comment.platform_comment_id,
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Twitter reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.data?.id || `tw_reply_${Date.now()}`;
+}
+
 const commentReplyWorker = new Worker(
   "comment-reply",
   async () => {
@@ -3166,6 +3507,12 @@ const commentReplyWorker = new Worker(
           platformReplyId = await postYouTubeReply(comment, reply.reply_text, account, brand.org_id);
         } else if (comment.platform === "linkedin") {
           platformReplyId = await postLinkedInReply(comment, reply.reply_text, account);
+        } else if (comment.platform === "facebook") {
+          platformReplyId = await postFacebookReply(comment, reply.reply_text, account);
+        } else if (comment.platform === "tiktok") {
+          platformReplyId = await postTikTokReply(comment, reply.reply_text, account);
+        } else if (comment.platform === "twitter") {
+          platformReplyId = await postTwitterReply(comment, reply.reply_text, account);
         } else {
           throw new Error(`Unsupported platform: ${comment.platform}`);
         }

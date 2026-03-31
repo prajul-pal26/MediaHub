@@ -4,6 +4,7 @@ import { getQueueConnection } from "./connection";
 let _publishQueue: Queue | null = null;
 let _analyticsQueue: Queue | null = null;
 let _historicalImportQueue: Queue | null = null;
+let _commentSyncQueue: Queue | null = null;
 
 export function getPublishQueue(): Queue {
   if (!_publishQueue) {
@@ -36,4 +37,13 @@ export function getHistoricalImportQueue(): Queue {
     });
   }
   return _historicalImportQueue;
+}
+
+export function getCommentSyncQueue(): Queue {
+  if (!_commentSyncQueue) {
+    _commentSyncQueue = new Queue("comment-sync", {
+      connection: getQueueConnection(),
+    });
+  }
+  return _commentSyncQueue;
 }

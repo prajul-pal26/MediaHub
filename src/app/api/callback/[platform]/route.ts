@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/supabase/db";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { verifyState } from "@/server/trpc/routers/social-accounts";
-import { getHistoricalImportQueue } from "@/server/queue/queues";
+import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
 
 export async function GET(
   request: NextRequest,
@@ -401,6 +401,17 @@ export async function GET(
         console.error("[social-callback] Failed to queue historical import:", e.message);
       }
 
+      // Queue comment sync for the reconnected account
+      try {
+        const commentSyncQueue = getCommentSyncQueue();
+        await commentSyncQueue.add(`comment-sync-${platform}-${state.brandId}`, {
+          brandId: state.brandId,
+        });
+        console.log(`[social-callback] Queued comment sync for ${platform}`);
+      } catch (e: any) {
+        console.error("[social-callback] Failed to queue comment sync:", e.message);
+      }
+
       return NextResponse.redirect(
         new URL(`/accounts?connected=${platform}&updated=true`, request.url)
       );
@@ -439,6 +450,17 @@ export async function GET(
       console.log(`[social-callback] Queued historical import for ${platform}`);
     } catch (e: any) {
       console.error("[social-callback] Failed to queue historical import:", e.message);
+    }
+
+    // Queue comment sync for the newly connected account
+    try {
+      const commentSyncQueue = getCommentSyncQueue();
+      await commentSyncQueue.add(`comment-sync-${platform}-${state.brandId}`, {
+        brandId: state.brandId,
+      });
+      console.log(`[social-callback] Queued comment sync for ${platform}`);
+    } catch (e: any) {
+      console.error("[social-callback] Failed to queue comment sync:", e.message);
     }
 
     return NextResponse.redirect(
