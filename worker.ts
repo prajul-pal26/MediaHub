@@ -726,6 +726,9 @@ const analyticsWorker = new Worker(
       }
     }
     console.log(`[analytics] Fetched analytics for ${fetched} jobs`);
+
+    // After fetching analytics, update prediction accuracy
+    await updatePredictionAccuracy();
   },
   { connection: redis }
 );
@@ -903,6 +906,382 @@ const tokenWorker = new Worker(
   { connection: redis }
 );
 
+// ─── Content Categorization Worker ───
+
+const categorizeWorker = new Worker(
+  "content-categorize",
+  async (job) => {
+    const { groupId, brandId, orgId } = job.data;
+    console.log(`[categorize] Analyzing content for group ${groupId}...`);
+
+    try {
+      // Get group details
+      const { data: group, error: groupErr } = await db().from("media_groups")
+        .select("id, title, caption, description, tags")
+        .eq("id", groupId)
+        .single();
+
+      if (groupErr || !group) {
+        console.error(`[categorize] Group not found: ${groupId}`);
+        return;
+      }
+
+      // Resolve LLM config for the org (worker has no user context, use org-level)
+      const { data: orgConfig } = await db().from("llm_configurations")
+        .select("*")
+        .eq("org_id", orgId)
+        .eq("scope", "org")
+        .eq("is_active", true)
+        .limit(1)
+        .single();
+
+      // Also check platform_credentials fallback
+      let apiKey = "";
+      let baseUrl = "https://openrouter.ai/api/v1";
+      let model = "deepseek/deepseek-chat-v3"; // Use cheapest model for categorization
+      let headers: Record<string, string> = {};
+
+      if (orgConfig?.api_key_encrypted) {
+        apiKey = decrypt(orgConfig.api_key_encrypted);
+        const provider = orgConfig.provider || "openrouter";
+        if (provider === "openrouter") {
+          baseUrl = "https://openrouter.ai/api/v1";
+          headers = { "Authorization": `Bearer ${apiKey}` };
+        } else if (provider === "openai") {
+          baseUrl = "https://api.openai.com/v1";
+          model = "gpt-4o-mini";
+          headers = { "Authorization": `Bearer ${apiKey}` };
+        } else {
+          baseUrl = orgConfig.base_url || baseUrl;
+          headers = { "Authorization": `Bearer ${apiKey}` };
+        }
+      } else {
+        // Fallback to platform_credentials
+        const { data: cred } = await db().from("platform_credentials")
+          .select("client_id_encrypted, metadata")
+          .eq("org_id", orgId)
+          .eq("platform", "llm_provider")
+          .limit(1)
+          .single();
+
+        if (cred?.client_id_encrypted) {
+          apiKey = decrypt(cred.client_id_encrypted);
+          headers = { "Authorization": `Bearer ${apiKey}` };
+        } else if (process.env.OPENROUTER_API_KEY) {
+          apiKey = process.env.OPENROUTER_API_KEY;
+          headers = { "Authorization": `Bearer ${apiKey}` };
+        }
+      }
+
+      if (!apiKey) {
+        console.warn(`[categorize] No LLM config for org ${orgId} — skipping`);
+        return;
+      }
+
+      const systemPrompt = `You are a content categorization AI for social media. Analyze the given content and return a JSON object with:
+- primary_category (string: one of "educational", "entertainment", "promotional", "behind_the_scenes", "user_generated", "news", "inspirational", "tutorial", "product_showcase", "lifestyle", "other")
+- secondary_category (string or null, same options)
+- tone (string: one of "professional", "casual", "humorous", "inspirational", "educational", "urgent", "emotional")
+- topics (array of strings, 3-5 relevant topic keywords)
+- sentiment_score (float -1 to 1, negative to positive)
+- predicted_engagement_score (float 0-100, estimated engagement potential)
+
+Respond ONLY with valid JSON, no markdown.`;
+
+      const userMessage = `Title: "${group.title}"
+Caption: "${group.caption || "N/A"}"
+Description: "${group.description || "N/A"}"
+Tags: ${(group.tags || []).join(", ") || "none"}`;
+
+      const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(`LLM error: ${(err as any).error?.message || response.statusText}`);
+      }
+
+      const llmResult = await response.json() as any;
+      const content = llmResult.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try {
+        parsed = JSON.parse(content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+      } catch {
+        console.error(`[categorize] Failed to parse LLM response for group ${groupId}`);
+        return;
+      }
+
+      // Insert into content_categories
+      const { error: saveErr } = await db().from("content_categories").insert({
+        group_id: groupId,
+        brand_id: brandId,
+        primary_category: parsed.primary_category || "other",
+        secondary_category: parsed.secondary_category || null,
+        tone: parsed.tone || null,
+        topics: parsed.topics || [],
+        sentiment_score: parsed.sentiment_score ?? null,
+        predicted_engagement_score: parsed.predicted_engagement_score ?? null,
+        analyzed_at: new Date().toISOString(),
+      });
+
+      if (saveErr) {
+        console.error(`[categorize] Failed to save categories:`, saveErr.message);
+      } else {
+        console.log(`[categorize] Categorized group ${groupId}: ${parsed.primary_category}`);
+      }
+    } catch (e: any) {
+      console.error(`[categorize] Error for group ${groupId}:`, e.message);
+      throw e;
+    }
+  },
+  { connection: redis, concurrency: 2 }
+);
+
+// ─── Trend Forecast Worker ───
+
+const trendForecastWorker = new Worker(
+  "trend-forecast",
+  async () => {
+    console.log("[trend-forecast] Running weekly trend forecast...");
+
+    // Get all brands
+    const { data: brands } = await db().from("brands").select("id, org_id, name");
+
+    for (const brand of brands || []) {
+      try {
+        // Get last 90 days of content categories
+        const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: categories } = await db().from("content_categories")
+          .select("primary_category, secondary_category, tone, topics, predicted_engagement_score, actual_engagement_rate")
+          .eq("brand_id", brand.id)
+          .gte("created_at", ninetyDaysAgo);
+
+        // Get post analytics
+        const { data: posts } = await db().from("content_posts")
+          .select("id, status, published_at, group_id")
+          .eq("brand_id", brand.id)
+          .eq("status", "published")
+          .gte("published_at", ninetyDaysAgo);
+
+        const postIds = (posts || []).map((p: any) => p.id);
+        let analytics: any[] = [];
+        if (postIds.length > 0) {
+          const { data: analyticsData } = await db().from("post_analytics")
+            .select("post_id, views, likes, comments, shares, engagement_rate")
+            .in("post_id", postIds);
+          analytics = analyticsData || [];
+        }
+
+        // Resolve LLM config
+        let apiKey = "";
+        let baseUrl = "https://openrouter.ai/api/v1";
+        let model = "deepseek/deepseek-chat-v3";
+        let headers: Record<string, string> = {};
+
+        const { data: orgConfig } = await db().from("llm_configurations")
+          .select("*")
+          .eq("org_id", brand.org_id)
+          .eq("scope", "org")
+          .eq("is_active", true)
+          .limit(1)
+          .single();
+
+        if (orgConfig?.api_key_encrypted) {
+          apiKey = decrypt(orgConfig.api_key_encrypted);
+          headers = { "Authorization": `Bearer ${apiKey}` };
+          if (orgConfig.base_url) baseUrl = orgConfig.base_url;
+        } else {
+          const { data: cred } = await db().from("platform_credentials")
+            .select("client_id_encrypted")
+            .eq("org_id", brand.org_id)
+            .eq("platform", "llm_provider")
+            .limit(1)
+            .single();
+
+          if (cred?.client_id_encrypted) {
+            apiKey = decrypt(cred.client_id_encrypted);
+            headers = { "Authorization": `Bearer ${apiKey}` };
+          } else if (process.env.OPENROUTER_API_KEY) {
+            apiKey = process.env.OPENROUTER_API_KEY;
+            headers = { "Authorization": `Bearer ${apiKey}` };
+          }
+        }
+
+        if (!apiKey) {
+          console.warn(`[trend-forecast] No LLM config for org ${brand.org_id} — skipping brand ${brand.name}`);
+          continue;
+        }
+
+        // Aggregate category counts
+        const catCounts: Record<string, number> = {};
+        const topicCounts: Record<string, number> = {};
+        for (const cat of categories || []) {
+          catCounts[cat.primary_category] = (catCounts[cat.primary_category] || 0) + 1;
+          for (const topic of cat.topics || []) {
+            topicCounts[topic] = (topicCounts[topic] || 0) + 1;
+          }
+        }
+
+        const systemPrompt = `You are a social media trend forecasting AI. Analyze the brand's content history and performance data to generate a trend forecast. Return a JSON object with:
+- trending_categories (array of objects: { category: string, score: number 0-100, trend: "rising"|"stable"|"declining" })
+- trending_topics (array of objects: { topic: string, score: number 0-100 })
+- trending_formats (array of objects: { format: string, recommendation: string })
+- content_recommendations (array of strings, 5-7 actionable content ideas)
+- content_gaps (array of strings, 3-5 content opportunities the brand is missing)
+- weekly_plan (array of objects: { day: string, content_type: string, topic: string, platform: string, best_time: string })
+
+Respond ONLY with valid JSON, no markdown.`;
+
+        const userMessage = `Brand: "${brand.name}"
+Content categories (last 90 days): ${JSON.stringify(catCounts)}
+Top topics: ${JSON.stringify(Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).slice(0, 20))}
+Total posts: ${(posts || []).length}
+Average views: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) => s + (a.views || 0), 0) / analytics.length) : 0}
+Average engagement: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) => s + (a.engagement_rate || 0), 0) / analytics.length * 100) / 100 : 0}%`;
+
+        const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify({
+            model,
+            max_tokens: 2048,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userMessage },
+            ],
+          }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          console.error(`[trend-forecast] LLM error for brand ${brand.name}:`, (err as any).error?.message || response.statusText);
+          continue;
+        }
+
+        const llmResult = await response.json() as any;
+        const content = llmResult.choices?.[0]?.message?.content || "{}";
+        let parsed: any;
+        try {
+          parsed = JSON.parse(content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+        } catch {
+          console.error(`[trend-forecast] Failed to parse LLM response for brand ${brand.name}`);
+          continue;
+        }
+
+        // Determine platforms from publish history
+        const platforms = ["instagram", "youtube", "linkedin"];
+        const today = new Date().toISOString().slice(0, 10);
+
+        for (const platform of platforms) {
+          await db().from("trend_snapshots").upsert({
+            brand_id: brand.id,
+            platform,
+            snapshot_date: today,
+            trending_categories: parsed.trending_categories || [],
+            trending_topics: parsed.trending_topics || [],
+            trending_formats: parsed.trending_formats || [],
+            content_recommendations: parsed.content_recommendations || [],
+            content_gaps: parsed.content_gaps || [],
+            weekly_plan: (parsed.weekly_plan || []).filter((p: any) => !p.platform || p.platform === platform),
+            generated_by: "ai",
+          }, { onConflict: "brand_id,platform,snapshot_date" });
+        }
+
+        console.log(`[trend-forecast] Generated forecast for brand ${brand.name}`);
+      } catch (e: any) {
+        console.error(`[trend-forecast] Error for brand ${brand.name}:`, e.message);
+      }
+    }
+
+    console.log("[trend-forecast] Weekly forecast complete");
+  },
+  { connection: redis }
+);
+
+// ─── Prediction Accuracy Update (runs after analytics fetch) ───
+
+async function updatePredictionAccuracy() {
+  console.log("[prediction-accuracy] Updating prediction accuracy...");
+
+  // Get predictions that don't have actual data yet
+  const { data: predictions } = await db().from("performance_predictions")
+    .select("id, group_id, brand_id, predicted_views_min, predicted_views_max, predicted_engagement_rate")
+    .is("actual_views", null);
+
+  let updated = 0;
+  for (const pred of predictions || []) {
+    // Find the content_post for this group
+    const { data: post } = await db().from("content_posts")
+      .select("id")
+      .eq("group_id", pred.group_id)
+      .eq("status", "published")
+      .limit(1)
+      .single();
+
+    if (!post) continue;
+
+    // Get the latest analytics for this post
+    const { data: analytics } = await db().from("post_analytics")
+      .select("views, engagement_rate")
+      .eq("post_id", post.id)
+      .order("fetched_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!analytics) continue;
+
+    // Calculate prediction accuracy
+    const actualViews = analytics.views || 0;
+    const predictedMid = ((pred.predicted_views_min || 0) + (pred.predicted_views_max || 0)) / 2;
+    let viewsAccuracy: number | null = null;
+    if (predictedMid > 0) {
+      viewsAccuracy = Math.max(0, 1 - Math.abs(actualViews - predictedMid) / predictedMid);
+    }
+
+    await db().from("performance_predictions")
+      .update({
+        actual_views: actualViews,
+        actual_engagement_rate: analytics.engagement_rate || 0,
+      })
+      .eq("id", pred.id);
+
+    // Also update content_categories with actual engagement rate
+    const { data: catRow } = await db().from("content_categories")
+      .select("id, predicted_engagement_score")
+      .eq("group_id", pred.group_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (catRow) {
+      const predScore = catRow.predicted_engagement_score || 0;
+      const actualRate = analytics.engagement_rate || 0;
+      const catAccuracy = predScore > 0 ? Math.max(0, 1 - Math.abs(actualRate - predScore) / predScore) : null;
+
+      await db().from("content_categories")
+        .update({
+          actual_engagement_rate: actualRate,
+          prediction_accuracy: catAccuracy,
+        })
+        .eq("id", catRow.id);
+    }
+
+    updated++;
+  }
+
+  console.log(`[prediction-accuracy] Updated ${updated} predictions`);
+}
+
 // ─── Startup ───
 
 async function verifyStartup() {
@@ -945,6 +1324,10 @@ async function verifyStartup() {
 
   await tokenQueue.add("refresh-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "token-refresh-cron" });
   console.log("  ✓ Token refresh cron (daily)");
+
+  const trendQueue = new Queue("trend-forecast", { connection: redis });
+  await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
+  console.log("  ✓ Trend forecast cron (weekly)");
 }
 
 console.log("Worker starting...");
@@ -957,6 +1340,8 @@ process.on("SIGTERM", async () => {
   await publishWorker.close();
   await analyticsWorker.close();
   await tokenWorker.close();
+  await categorizeWorker.close();
+  await trendForecastWorker.close();
   await redis.quit();
   process.exit(0);
 });

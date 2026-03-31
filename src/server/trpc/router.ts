@@ -12,6 +12,7 @@ import { socialAccountsRouter } from "./routers/social-accounts";
 import { invitationsRouter } from "./routers/invitations";
 import { chatRouter } from "./routers/chat";
 import { llmRouter } from "./routers/llm";
+import { analyticsRouter } from "./routers/analytics";
 
 export async function createTRPCContext() {
   const supabase = await createServerSupabaseClient();
@@ -53,6 +54,7 @@ export const appRouter = router({
   invitations: invitationsRouter,
   chat: chatRouter,
   llm: llmRouter,
+  analytics: analyticsRouter,
 });
 
 export type AppRouter = typeof appRouter;

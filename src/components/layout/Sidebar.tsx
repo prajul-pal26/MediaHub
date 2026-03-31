@@ -16,6 +16,9 @@ import {
   BarChart3,
   FileText,
   Download,
+  Brain,
+  Heart,
+  Users,
 } from "lucide-react";
 
 interface NavItem {
@@ -52,6 +55,9 @@ const navItems: NavItem[] = [
 
   // Analytics Mode
   { label: "Overview", href: "/analytics", icon: BarChart3, mode: "analytics" },
+  { label: "Intelligence", href: "/analytics/intelligence", icon: Brain, mode: "analytics" },
+  { label: "Sentiment", href: "/analytics/sentiment", icon: Heart, mode: "analytics" },
+  { label: "Competitors", href: "/analytics/competitors", icon: Users, mode: "analytics" },
   { label: "Post Analytics", href: "/analytics/posts", icon: FileText, mode: "analytics" },
   { label: "Export", href: "/analytics/export", icon: Download, mode: "analytics" },
 ];

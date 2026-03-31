@@ -3,6 +3,8 @@ import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { getDb } from "@/lib/supabase/db";
 import { uploadFile } from "@/server/services/drive/client";
 import sharp from "sharp";
+import { Queue } from "bullmq";
+import { getRedis } from "@/lib/redis";
 
 function calculateAspectRatio(width: number, height: number): string {
   const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
@@ -210,6 +212,19 @@ export async function POST(request: NextRequest) {
       .from("media_groups")
       .update({ variant_count: count || 1 })
       .eq("id", groupId);
+
+    // Queue content categorization job (fire-and-forget)
+    try {
+      const categorizeQueue = new Queue("content-categorize", { connection: getRedis() });
+      await categorizeQueue.add("categorize", {
+        groupId,
+        brandId,
+        orgId: profile.org_id,
+      }, { jobId: `categorize-${groupId}-${Date.now()}` });
+    } catch (categorizeErr) {
+      // Non-critical: don't fail upload if categorization queue fails
+      console.warn("[upload] Failed to queue categorization:", (categorizeErr as Error).message);
+    }
 
     return NextResponse.json({
       asset,

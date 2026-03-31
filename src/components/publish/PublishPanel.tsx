@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import { PLATFORM_RULES } from "@/server/services/media/rules-engine";
 import {
   ChevronRight, ChevronLeft, Send, CalendarDays, Save, Loader2,
-  CheckCircle2, Lock, Circle, AlertCircle, Check,
+  CheckCircle2, Lock, Circle, AlertCircle, Check, TrendingUp, Clock, Lightbulb,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ActionAvailability } from "@/server/services/media/rules-engine";
@@ -124,6 +124,12 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
 
   const publishableJobs = jobs.filter((j) => !j.isBlocked);
   const blockedJobs = jobs.filter((j) => j.isBlocked);
+
+  // Performance prediction for review step
+  const firstPublishable = publishableJobs[0];
+  const predictionMutation = trpc.analytics.getPrediction.useMutation();
+  const prediction = predictionMutation.data;
+  const predictionLoading = predictionMutation.isPending;
 
   function toggleAction(key: string) {
     setSelectedActions((prev) =>
@@ -519,6 +525,67 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
                 ))}
               </div>
             </div>
+          )}
+
+          {/* Performance Prediction Card */}
+          {firstPublishable && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4" />
+                  Performance Prediction
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {predictionLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Generating prediction...
+                  </div>
+                ) : prediction ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-2 bg-muted/50 rounded-lg">
+                        <p className="text-xs text-muted-foreground">Predicted Views</p>
+                        <p className="text-sm font-semibold">
+                          {prediction.predictedViewsMin.toLocaleString()} - {prediction.predictedViewsMax.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-2 bg-muted/50 rounded-lg">
+                        <p className="text-xs text-muted-foreground">Engagement Rate</p>
+                        <p className="text-sm font-semibold">{prediction.engagementRate}%</p>
+                      </div>
+                      <div className="p-2 bg-muted/50 rounded-lg">
+                        <div className="flex items-center gap-1">
+                          <Clock className="h-3 w-3 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">Best Time</p>
+                        </div>
+                        <p className="text-sm font-semibold">{prediction.bestTime}</p>
+                      </div>
+                      <div className="p-2 bg-muted/50 rounded-lg">
+                        <p className="text-xs text-muted-foreground">Confidence</p>
+                        <p className="text-sm font-semibold">{prediction.confidence}%</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{prediction.reasoning}</p>
+                    {prediction.suggestions.length > 0 && (
+                      <div className="space-y-1">
+                        {prediction.suggestions.map((s: any, i: any) => (
+                          <div key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                            <Lightbulb className="h-3 w-3 mt-0.5 shrink-0 text-amber-500" />
+                            <span>{s}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground py-1">
+                    Performance prediction not available. Configure an LLM provider to enable AI predictions.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
           )}
         </div>
       )}

@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, Brain, Heart, Users } from "lucide-react";
 
 export default function AnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
@@ -76,6 +77,63 @@ export default function AnalyticsPage() {
             </Card>
           </>
         )}
+      </div>
+
+      {/* Navigation to sub-pages */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Link href="/analytics/intelligence" className="block">
+          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-purple-100 flex items-center justify-center">
+                  <Brain className="h-5 w-5 text-purple-700" />
+                </div>
+                <CardTitle className="text-base">Content Intelligence</CardTitle>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                AI-powered category performance, trend forecasts, content recommendations, and weekly plans.
+              </p>
+            </CardContent>
+          </Card>
+        </Link>
+
+        <Link href="/analytics/sentiment" className="block">
+          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-pink-100 flex items-center justify-center">
+                  <Heart className="h-5 w-5 text-pink-700" />
+                </div>
+                <CardTitle className="text-base">Sentiment Analysis</CardTitle>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                Audience sentiment from comments, top themes, purchase intent, and response tracking.
+              </p>
+            </CardContent>
+          </Card>
+        </Link>
+
+        <Link href="/analytics/competitors" className="block">
+          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-blue-100 flex items-center justify-center">
+                  <Users className="h-5 w-5 text-blue-700" />
+                </div>
+                <CardTitle className="text-base">Competitor Benchmarking</CardTitle>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                Track competitor handles, compare follower counts, and benchmark engagement rates.
+              </p>
+            </CardContent>
+          </Card>
+        </Link>
       </div>
 
       {/* Placeholder for charts */}
