@@ -64,6 +64,8 @@ export async function processMessage(
       messages,
       tools: tools.length > 0 ? tools : undefined,
       orgId: ctx.orgId,
+      userId: ctx.userId,
+      brandId: ctx.brandId,
     });
 
     const choice = response.choices?.[0];
