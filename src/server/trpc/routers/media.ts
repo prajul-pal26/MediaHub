@@ -353,12 +353,12 @@ export const mediaRouter = router({
       const totalMedia = all.reduce((sum: number, g: any) => sum + (g.variant_count || 0), 0);
 
       // Publish job counts (each action+account = 1 publish)
-      const { data: jobs } = await db
+      const { data: jobs, error: jobsErr } = await db
         .from("publish_jobs")
         .select("status, content_posts!inner(brand_id)")
         .eq("content_posts.brand_id", input.brandId);
 
-      const allJobs = jobs || [];
+      const allJobs = jobsErr ? [] : (jobs || []);
 
       return {
         total: totalMedia,

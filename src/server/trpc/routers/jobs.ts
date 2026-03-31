@@ -110,12 +110,12 @@ export const jobsRouter = router({
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
-      const { data: jobs } = await db
+      const { data: jobs, error } = await db
         .from("publish_jobs")
         .select("status, content_posts!inner(brand_id)")
         .eq("content_posts.brand_id", input.brandId);
 
-      const all = jobs || [];
+      const all = error ? [] : (jobs || []);
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
