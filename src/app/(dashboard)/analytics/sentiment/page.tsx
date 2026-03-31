@@ -122,7 +122,7 @@ export default function SentimentPage() {
   }
 
   const hasData =
-    sentiment &&
+    sentiment?.overall &&
     (sentiment.overall.positive > 0 ||
       sentiment.overall.negative > 0 ||
       sentiment.overall.neutral > 0);

@@ -99,6 +99,19 @@ export default function IntelligencePage() {
 
   const allLoading = catLoading || forecastLoading || recLoading;
 
+  // Safe defaults for nested data
+  const safeCategories = categories || [];
+  const safeForecast = {
+    categories: forecast?.categories || [],
+    topics: forecast?.topics || [],
+    formats: forecast?.formats || [],
+  };
+  const safeRecommendations = {
+    recommendations: recommendations?.recommendations || [],
+    weekly_plan: recommendations?.weekly_plan || [],
+    content_gaps: recommendations?.content_gaps || [],
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -132,7 +145,7 @@ export default function IntelligencePage() {
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-          ) : !categories || categories.length === 0 ? (
+          ) : safeCategories.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <p className="text-sm">
                 No category data yet. Publish content with tags to see category
@@ -151,7 +164,7 @@ export default function IntelligencePage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {categories.map((cat) => (
+                {safeCategories.map((cat) => (
                   <TableRow key={cat.category}>
                     <TableCell className="font-medium">{cat.category}</TableCell>
                     <TableCell className="text-right">{cat.post_count}</TableCell>
@@ -183,9 +196,9 @@ export default function IntelligencePage() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : !forecast ||
-            (forecast.categories.length === 0 &&
-              forecast.topics.length === 0 &&
-              forecast.formats.length === 0) ? (
+            (safeForecast.categories.length === 0 &&
+              safeForecast.topics.length === 0 &&
+              safeForecast.formats.length === 0) ? (
             <div className="text-center py-8 text-muted-foreground">
               <TrendingUp className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p className="text-sm">
@@ -195,11 +208,11 @@ export default function IntelligencePage() {
             </div>
           ) : (
             <div className="space-y-4">
-              {forecast.categories.length > 0 && (
+              {safeForecast.categories.length > 0 && (
                 <div>
                   <h4 className="text-sm font-medium mb-2">Categories</h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {forecast.categories.map((item: any) => (
+                    {safeForecast.categories.map((item: any) => (
                       <div
                         key={item.name}
                         className="p-3 rounded-lg border bg-card"
@@ -218,11 +231,11 @@ export default function IntelligencePage() {
                   </div>
                 </div>
               )}
-              {forecast.topics.length > 0 && (
+              {safeForecast.topics.length > 0 && (
                 <div>
                   <h4 className="text-sm font-medium mb-2">Topics</h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {forecast.topics.map((item: any) => (
+                    {safeForecast.topics.map((item: any) => (
                       <div
                         key={item.name}
                         className="p-3 rounded-lg border bg-card"
@@ -241,11 +254,11 @@ export default function IntelligencePage() {
                   </div>
                 </div>
               )}
-              {forecast.formats.length > 0 && (
+              {safeForecast.formats.length > 0 && (
                 <div>
                   <h4 className="text-sm font-medium mb-2">Formats</h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {forecast.formats.map((item: any) => (
+                    {safeForecast.formats.map((item: any) => (
                       <div
                         key={item.name}
                         className="p-3 rounded-lg border bg-card"
@@ -280,7 +293,7 @@ export default function IntelligencePage() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : !recommendations ||
-            recommendations.recommendations.length === 0 ? (
+            safeRecommendations.recommendations.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <Lightbulb className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p className="text-sm">
@@ -290,7 +303,7 @@ export default function IntelligencePage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {recommendations.recommendations.map((rec: any, i: any) => (
+              {safeRecommendations.recommendations.map((rec: any, i: any) => (
                 <div key={i} className="p-4 rounded-lg border bg-card space-y-2">
                   <div className="flex items-start justify-between">
                     <h4 className="text-sm font-semibold">{rec.title}</h4>
@@ -333,7 +346,7 @@ export default function IntelligencePage() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : !recommendations ||
-            recommendations.weekly_plan.length === 0 ? (
+            safeRecommendations.weekly_plan.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <CalendarDays className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p className="text-sm">
@@ -353,7 +366,7 @@ export default function IntelligencePage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recommendations.weekly_plan.map((item: any, i: any) => (
+                {safeRecommendations.weekly_plan.map((item: any, i: any) => (
                   <TableRow key={i}>
                     <TableCell className="font-medium">{item.day}</TableCell>
                     <TableCell className="capitalize">{item.platform}</TableCell>
@@ -379,7 +392,7 @@ export default function IntelligencePage() {
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : !recommendations ||
-            recommendations.content_gaps.length === 0 ? (
+            safeRecommendations.content_gaps.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <p className="text-sm">
                 No content gaps identified. Keep publishing to get insights on
@@ -388,7 +401,7 @@ export default function IntelligencePage() {
             </div>
           ) : (
             <div className="space-y-3">
-              {recommendations.content_gaps.map((gap: any, i: any) => (
+              {safeRecommendations.content_gaps.map((gap: any, i: any) => (
                 <div
                   key={i}
                   className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg"

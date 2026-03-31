@@ -143,7 +143,7 @@ export default function CompetitorsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {competitors.map((comp: any) => (
+                {(competitors || []).map((comp: any) => (
                   <TableRow key={comp.id}>
                     <TableCell className="font-medium">@{comp.handle}</TableCell>
                     <TableCell className="capitalize">{comp.platform}</TableCell>
