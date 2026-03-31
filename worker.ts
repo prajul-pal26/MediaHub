@@ -734,19 +734,42 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
 
   const views = parseInt(stats.viewCount || "0");
 
-  // Estimate avg view duration (YouTube Analytics API would give exact data,
-  // but requires separate OAuth scope — using estimation for now)
-  const estimatedAvgDuration = totalSeconds > 0 ? totalSeconds * 0.4 : 0; // ~40% avg retention is typical
-  const retentionRate = totalSeconds > 0 ? 40 : 0; // Default estimate
+  // Fetch real retention data from YouTube Analytics API
+  let avgViewDuration = 0;
+  let watchTimeMinutes = 0;
+  try {
+    const youtubeAnalytics = google.youtubeAnalytics({ version: "v2", auth: oauth2 });
+    const analyticsRes = await youtubeAnalytics.reports.query({
+      ids: "channel==MINE",
+      startDate: "2020-01-01",
+      endDate: new Date().toISOString().split("T")[0],
+      metrics: "estimatedMinutesWatched,averageViewDuration",
+      filters: `video==${platformPostId}`,
+    });
+    const row = analyticsRes.data.rows?.[0];
+    if (row) {
+      watchTimeMinutes = row[0] as number || 0;
+      avgViewDuration = row[1] as number || 0;
+    }
+  } catch (e: any) {
+    console.warn(`[analytics] YouTube Analytics API failed for ${platformPostId}: ${e.message}`);
+    // Fallback: estimate from duration if API fails
+    avgViewDuration = totalSeconds > 0 ? totalSeconds * 0.4 : 0;
+    watchTimeMinutes = views * avgViewDuration / 60;
+  }
+
+  const retentionRate = totalSeconds > 0 && avgViewDuration > 0
+    ? Math.round((avgViewDuration / totalSeconds) * 10000) / 100
+    : 0;
 
   return {
     views,
     likes: parseInt(stats.likeCount || "0"),
     comments: parseInt(stats.commentCount || "0"),
     shares: 0,
-    impressions: views, // YouTube: impressions ≈ views for basic stats
-    watch_time_seconds: Math.round(views * estimatedAvgDuration),
-    avg_view_duration_seconds: Math.round(estimatedAvgDuration),
+    impressions: views,
+    watch_time_seconds: Math.round(watchTimeMinutes * 60),
+    avg_view_duration_seconds: Math.round(avgViewDuration),
     retention_rate: retentionRate,
   };
 }
@@ -1702,6 +1725,497 @@ async function updatePredictionAccuracy() {
   console.log(`[prediction-accuracy] Updated ${updated} predictions`);
 }
 
+// ─── Comment Sync Helpers ───
+
+async function syncInstagramComments(account: any, brandId: string) {
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) return 0;
+
+  const igUserId = account.platform_user_id;
+  let synced = 0;
+
+  // Get recent media to fetch comments from
+  const mediaRes = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${igUserId}/media?fields=id,caption,timestamp&limit=25&access_token=${pageToken}`
+  );
+  const mediaData = await mediaRes.json();
+  if (mediaData.error) {
+    console.error(`[comment-sync] IG media list error: ${mediaData.error.message}`);
+    return 0;
+  }
+
+  for (const media of mediaData.data || []) {
+    try {
+      // Fetch comments for this media
+      const commentsRes = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${media.id}/comments?fields=id,text,username,timestamp,like_count,replies{id,text,username,timestamp,like_count}&limit=50&access_token=${pageToken}`
+      );
+      const commentsData = await commentsRes.json();
+      if (commentsData.error) continue;
+
+      // Find the content_post linked to this platform_post_id
+      const { data: publishJob } = await db().from("publish_jobs")
+        .select("id, post_id")
+        .eq("platform_post_id", media.id)
+        .eq("social_account_id", account.id)
+        .limit(1)
+        .maybeSingle();
+
+      for (const comment of commentsData.data || []) {
+        // Upsert comment
+        const { error: upsertErr } = await db().from("platform_comments")
+          .upsert({
+            brand_id: brandId,
+            post_id: publishJob?.post_id || null,
+            publish_job_id: publishJob?.id || null,
+            social_account_id: account.id,
+            platform: "instagram",
+            platform_comment_id: comment.id,
+            platform_post_id: media.id,
+            author_username: comment.username || "unknown",
+            author_profile_url: null,
+            author_avatar_url: null,
+            comment_text: comment.text,
+            comment_timestamp: comment.timestamp,
+            like_count: comment.like_count || 0,
+            reply_count: comment.replies?.data?.length || 0,
+            synced_at: new Date().toISOString(),
+          }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+        if (!upsertErr) synced++;
+
+        // Also sync nested replies as separate comments
+        for (const reply of comment.replies?.data || []) {
+          const { error: replyErr } = await db().from("platform_comments")
+            .upsert({
+              brand_id: brandId,
+              post_id: publishJob?.post_id || null,
+              publish_job_id: publishJob?.id || null,
+              social_account_id: account.id,
+              platform: "instagram",
+              platform_comment_id: reply.id,
+              platform_post_id: media.id,
+              platform_parent_comment_id: comment.id,
+              author_username: reply.username || "unknown",
+              comment_text: reply.text,
+              comment_timestamp: reply.timestamp,
+              like_count: reply.like_count || 0,
+              synced_at: new Date().toISOString(),
+            }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+          if (!replyErr) synced++;
+        }
+      }
+
+      // Rate limit
+      if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
+    } catch (e: any) {
+      console.error(`[comment-sync] IG comment fetch error for media ${media.id}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+async function syncYouTubeComments(account: any, brandId: string, orgId: string) {
+  const { data: creds } = await db().from("platform_credentials")
+    .select("*").eq("org_id", orgId).eq("platform", "youtube").single();
+  if (!creds) return 0;
+
+  const oauth2 = new google.auth.OAuth2(
+    decrypt(creds.client_id_encrypted),
+    decrypt(creds.client_secret_encrypted)
+  );
+  oauth2.setCredentials({
+    access_token: decrypt(account.access_token_encrypted),
+    refresh_token: account.refresh_token_encrypted ? decrypt(account.refresh_token_encrypted) : null,
+  });
+
+  const youtube = google.youtube({ version: "v3", auth: oauth2 });
+  let synced = 0;
+
+  // Get recent videos
+  const searchRes = await youtube.search.list({
+    channelId: account.platform_user_id,
+    type: ["video"],
+    part: ["snippet"],
+    maxResults: 25,
+    order: "date",
+  });
+
+  for (const item of searchRes.data.items || []) {
+    const videoId = item.id?.videoId;
+    if (!videoId) continue;
+
+    try {
+      let pageToken: string | undefined;
+      do {
+        const commentsRes = await youtube.commentThreads.list({
+          videoId,
+          part: ["snippet", "replies"],
+          maxResults: 100,
+          pageToken,
+          order: "time",
+        });
+
+        // Find linked content_post
+        const { data: publishJob } = await db().from("publish_jobs")
+          .select("id, post_id")
+          .eq("platform_post_id", videoId)
+          .eq("social_account_id", account.id)
+          .limit(1)
+          .maybeSingle();
+
+        for (const thread of commentsRes.data.items || []) {
+          const topComment = thread.snippet?.topLevelComment?.snippet;
+          if (!topComment) continue;
+
+          const commentId = thread.snippet?.topLevelComment?.id || thread.id || "";
+
+          const { error } = await db().from("platform_comments")
+            .upsert({
+              brand_id: brandId,
+              post_id: publishJob?.post_id || null,
+              publish_job_id: publishJob?.id || null,
+              social_account_id: account.id,
+              platform: "youtube",
+              platform_comment_id: commentId,
+              platform_post_id: videoId,
+              author_username: topComment.authorDisplayName || "unknown",
+              author_profile_url: topComment.authorChannelUrl || null,
+              author_avatar_url: topComment.authorProfileImageUrl || null,
+              comment_text: topComment.textDisplay || topComment.textOriginal || "",
+              comment_timestamp: topComment.publishedAt || new Date().toISOString(),
+              like_count: topComment.likeCount || 0,
+              reply_count: thread.snippet?.totalReplyCount || 0,
+              synced_at: new Date().toISOString(),
+            }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+          if (!error) synced++;
+
+          // Sync replies
+          for (const reply of thread.replies?.comments || []) {
+            const replySnippet = reply.snippet;
+            if (!replySnippet) continue;
+
+            const { error: replyErr } = await db().from("platform_comments")
+              .upsert({
+                brand_id: brandId,
+                post_id: publishJob?.post_id || null,
+                publish_job_id: publishJob?.id || null,
+                social_account_id: account.id,
+                platform: "youtube",
+                platform_comment_id: reply.id || "",
+                platform_post_id: videoId,
+                platform_parent_comment_id: commentId,
+                author_username: replySnippet.authorDisplayName || "unknown",
+                author_profile_url: replySnippet.authorChannelUrl || null,
+                author_avatar_url: replySnippet.authorProfileImageUrl || null,
+                comment_text: replySnippet.textDisplay || replySnippet.textOriginal || "",
+                comment_timestamp: replySnippet.publishedAt || new Date().toISOString(),
+                like_count: replySnippet.likeCount || 0,
+                synced_at: new Date().toISOString(),
+              }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+            if (!replyErr) synced++;
+          }
+        }
+
+        pageToken = commentsRes.data.nextPageToken || undefined;
+      } while (pageToken && synced < 500);
+    } catch (e: any) {
+      console.error(`[comment-sync] YT comment fetch error for video ${videoId}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+async function syncLinkedInComments(account: any, brandId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const personUrn = account.platform_metadata?.person_urn;
+  if (!personUrn) return 0;
+
+  let synced = 0;
+
+  // Get recent published posts for this account
+  const { data: publishJobs } = await db().from("publish_jobs")
+    .select("id, post_id, platform_post_id")
+    .eq("social_account_id", account.id)
+    .eq("status", "completed")
+    .not("platform_post_id", "is", null)
+    .order("completed_at", { ascending: false })
+    .limit(25);
+
+  for (const pj of publishJobs || []) {
+    if (!pj.platform_post_id) continue;
+
+    try {
+      const commentsRes = await fetchWithTimeout(
+        `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(pj.platform_post_id)}/comments?count=50`,
+        {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "LinkedIn-Version": "202401",
+          },
+        }
+      );
+
+      if (!commentsRes.ok) continue;
+      const commentsData = await commentsRes.json();
+
+      for (const comment of commentsData.elements || []) {
+        const commentId = comment["$URN"] || comment.id || `li_${Date.now()}_${synced}`;
+        const actorUrn = comment.actor || "";
+        const authorName = comment.created?.actor || actorUrn.split(":").pop() || "LinkedIn User";
+
+        const { error } = await db().from("platform_comments")
+          .upsert({
+            brand_id: brandId,
+            post_id: pj.post_id,
+            publish_job_id: pj.id,
+            social_account_id: account.id,
+            platform: "linkedin",
+            platform_comment_id: commentId,
+            platform_post_id: pj.platform_post_id,
+            author_username: authorName,
+            comment_text: comment.message?.text || comment.comment || "",
+            comment_timestamp: comment.created?.time
+              ? new Date(comment.created.time).toISOString()
+              : new Date().toISOString(),
+            like_count: comment.likeCount || 0,
+            synced_at: new Date().toISOString(),
+          }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+        if (!error) synced++;
+      }
+    } catch (e: any) {
+      console.error(`[comment-sync] LI comment fetch error for post ${pj.platform_post_id}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+// ─── Comment Sync Worker ───
+
+const commentSyncWorker = new Worker(
+  "comment-sync",
+  async (job) => {
+    const { brandId } = job.data;
+    console.log(`[comment-sync] Starting sync for brand ${brandId || "all"}...`);
+
+    let totalSynced = 0;
+    let brandsProcessed = 0;
+
+    // Get brands to sync
+    let brands: any[];
+    if (brandId) {
+      const { data } = await db().from("brands").select("id, org_id").eq("id", brandId).single();
+      brands = data ? [data] : [];
+    } else {
+      const { data } = await db().from("brands").select("id, org_id");
+      brands = data || [];
+    }
+
+    for (const brand of brands) {
+      // Get all active social accounts for this brand
+      const { data: accounts } = await db().from("social_accounts")
+        .select("*")
+        .eq("brand_id", brand.id)
+        .eq("is_active", true);
+
+      for (const account of accounts || []) {
+        try {
+          let count = 0;
+          if (account.platform === "instagram") {
+            count = await syncInstagramComments(account, brand.id);
+          } else if (account.platform === "youtube") {
+            count = await syncYouTubeComments(account, brand.id, brand.org_id);
+          } else if (account.platform === "linkedin") {
+            count = await syncLinkedInComments(account, brand.id);
+          }
+          totalSynced += count;
+          console.log(`[comment-sync] ${account.platform}/@${account.platform_username}: ${count} comments synced`);
+        } catch (e: any) {
+          console.error(`[comment-sync] Error syncing ${account.platform}/@${account.platform_username}:`, e.message);
+        }
+      }
+      brandsProcessed++;
+    }
+
+    console.log(`[comment-sync] Done: ${totalSynced} comments synced across ${brandsProcessed} brands`);
+  },
+  { connection: redis }
+);
+
+// ─── Comment Reply Worker ───
+
+async function postInstagramReply(comment: any, replyText: string, account: any): Promise<string> {
+  const pageToken = account.platform_metadata?.page_access_token_encrypted
+    ? decrypt(account.platform_metadata.page_access_token_encrypted)
+    : null;
+  if (!pageToken) throw new Error("No Instagram page access token");
+
+  const res = await fetchWithTimeout(
+    `https://graph.facebook.com/v19.0/${comment.platform_comment_id}/replies`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: replyText,
+        access_token: pageToken,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Instagram reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.id || `ig_reply_${Date.now()}`;
+}
+
+async function postYouTubeReply(comment: any, replyText: string, account: any, orgId: string): Promise<string> {
+  const { data: creds } = await db().from("platform_credentials")
+    .select("*").eq("org_id", orgId).eq("platform", "youtube").single();
+  if (!creds) throw new Error("YouTube credentials not found");
+
+  const oauth2 = new google.auth.OAuth2(
+    decrypt(creds.client_id_encrypted),
+    decrypt(creds.client_secret_encrypted)
+  );
+  oauth2.setCredentials({
+    access_token: decrypt(account.access_token_encrypted),
+    refresh_token: account.refresh_token_encrypted ? decrypt(account.refresh_token_encrypted) : null,
+  });
+
+  const youtube = google.youtube({ version: "v3", auth: oauth2 });
+
+  // YouTube replies must be to the top-level comment
+  const parentId = comment.platform_parent_comment_id || comment.platform_comment_id;
+
+  const response = await youtube.comments.insert({
+    part: ["snippet"],
+    requestBody: {
+      snippet: {
+        parentId: parentId,
+        textOriginal: replyText,
+      },
+    },
+  });
+
+  return response.data.id || `yt_reply_${Date.now()}`;
+}
+
+async function postLinkedInReply(comment: any, replyText: string, account: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const personUrn = account.platform_metadata?.person_urn;
+  if (!personUrn) throw new Error("No LinkedIn person URN");
+
+  const postUrn = comment.platform_post_id;
+
+  const res = await fetchWithTimeout(
+    `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(postUrn)}/comments`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        "LinkedIn-Version": "202401",
+      },
+      body: JSON.stringify({
+        actor: personUrn,
+        message: { text: replyText },
+        parentComment: comment.platform_comment_id,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`LinkedIn reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.id || data["$URN"] || `li_reply_${Date.now()}`;
+}
+
+const commentReplyWorker = new Worker(
+  "comment-reply",
+  async () => {
+    // Process all pending replies
+    const { data: pendingReplies } = await db().from("comment_replies")
+      .select("*, platform_comments(id, platform, platform_comment_id, platform_post_id, platform_parent_comment_id, social_account_id, brand_id)")
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .limit(50);
+
+    let sent = 0;
+    let errors = 0;
+
+    for (const reply of pendingReplies || []) {
+      const comment = reply.platform_comments;
+      if (!comment) {
+        await db().from("comment_replies").update({ status: "failed", error_message: "Comment not found" }).eq("id", reply.id);
+        errors++;
+        continue;
+      }
+
+      // Mark as sending
+      await db().from("comment_replies").update({ status: "sending" }).eq("id", reply.id);
+
+      try {
+        // Get social account
+        const { data: account } = await db().from("social_accounts")
+          .select("*").eq("id", comment.social_account_id).single();
+        if (!account) throw new Error("Social account not found");
+
+        // Get org_id for YouTube credentials
+        const { data: brand } = await db().from("brands")
+          .select("org_id").eq("id", comment.brand_id).single();
+        if (!brand) throw new Error("Brand not found");
+
+        let platformReplyId: string;
+
+        if (comment.platform === "instagram") {
+          platformReplyId = await postInstagramReply(comment, reply.reply_text, account);
+        } else if (comment.platform === "youtube") {
+          platformReplyId = await postYouTubeReply(comment, reply.reply_text, account, brand.org_id);
+        } else if (comment.platform === "linkedin") {
+          platformReplyId = await postLinkedInReply(comment, reply.reply_text, account);
+        } else {
+          throw new Error(`Unsupported platform: ${comment.platform}`);
+        }
+
+        await db().from("comment_replies").update({
+          status: "sent",
+          platform_reply_id: platformReplyId,
+          sent_at: new Date().toISOString(),
+        }).eq("id", reply.id);
+
+        sent++;
+      } catch (e: any) {
+        console.error(`[comment-reply] Failed to post reply ${reply.id}:`, e.message);
+        await db().from("comment_replies").update({
+          status: "failed",
+          error_message: e.message,
+        }).eq("id", reply.id);
+        errors++;
+      }
+    }
+
+    if (sent > 0 || errors > 0) {
+      console.log(`[comment-reply] Processed: ${sent} sent, ${errors} failed`);
+    }
+  },
+  { connection: redis }
+);
+
 // ─── Startup ───
 
 async function verifyStartup() {
@@ -1748,6 +2262,16 @@ async function verifyStartup() {
   const trendQueue = new Queue("trend-forecast", { connection: redis });
   await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
   console.log("  ✓ Trend forecast cron (weekly)");
+
+  // Comment sync — every 2 hours
+  const commentSyncQueue = new Queue("comment-sync", { connection: redis });
+  await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
+  console.log("  ✓ Comment sync cron (every 2 hours)");
+
+  // Comment reply processing — every 30 seconds
+  const commentReplyQueue = new Queue("comment-reply", { connection: redis });
+  await commentReplyQueue.add("process-pending", {}, { repeat: { every: 30 * 1000 }, jobId: "comment-reply-cron" });
+  console.log("  ✓ Comment reply processing (every 30s)");
 }
 
 console.log("Worker starting...");
@@ -1763,6 +2287,8 @@ process.on("SIGTERM", async () => {
   await tokenWorker.close();
   await categorizeWorker.close();
   await trendForecastWorker.close();
+  await commentSyncWorker.close();
+  await commentReplyWorker.close();
   await redis.quit();
   process.exit(0);
 });
