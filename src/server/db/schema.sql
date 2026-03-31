@@ -152,6 +152,7 @@ CREATE TABLE publish_jobs (
   platform_post_id TEXT,
   completed_at TIMESTAMPTZ,
   next_retry_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ DEFAULT now(),
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
