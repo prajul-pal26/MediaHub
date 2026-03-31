@@ -634,13 +634,17 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
         }
 
         // Aggregate analytics
-        const totalViews = (analytics || []).reduce((s: number, a: any) => s + (a.views || 0), 0);
-        const totalLikes = (analytics || []).reduce((s: number, a: any) => s + (a.likes || 0), 0);
-        const totalComments = (analytics || []).reduce((s: number, a: any) => s + (a.comments || 0), 0);
-        const totalShares = (analytics || []).reduce((s: number, a: any) => s + (a.shares || 0), 0);
-        const totalSaves = (analytics || []).reduce((s: number, a: any) => s + (a.saves || 0), 0);
-        const totalReach = (analytics || []).reduce((s: number, a: any) => s + (a.reach || 0), 0);
-        const totalImpressions = (analytics || []).reduce((s: number, a: any) => s + (a.impressions || 0), 0);
+        const aa = analytics || [];
+        const totalViews = aa.reduce((s: number, a: any) => s + (a.views || 0), 0);
+        const totalLikes = aa.reduce((s: number, a: any) => s + (a.likes || 0), 0);
+        const totalComments = aa.reduce((s: number, a: any) => s + (a.comments || 0), 0);
+        const totalShares = aa.reduce((s: number, a: any) => s + (a.shares || 0), 0);
+        const totalSaves = aa.reduce((s: number, a: any) => s + (a.saves || 0), 0);
+        const totalReach = aa.reduce((s: number, a: any) => s + (a.reach || 0), 0);
+        const totalImpressions = aa.reduce((s: number, a: any) => s + (a.impressions || 0), 0);
+        const totalClicks = aa.reduce((s: number, a: any) => s + (a.clicks || 0), 0);
+        const avgRetention = aa.length > 0 ? Math.round(aa.reduce((s: number, a: any) => s + (a.retention_rate || 0), 0) / aa.length * 100) / 100 : 0;
+        const totalWatchTime = aa.reduce((s: number, a: any) => s + (a.watch_time_seconds || 0), 0);
 
         // Determine content type from action
         const action = (jobs || [])[0]?.action || "unknown";
@@ -671,6 +675,9 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
           saves: totalSaves,
           reach: totalReach,
           impressions: totalImpressions,
+          clicks: totalClicks,
+          retention_rate: avgRetention,
+          watch_time_seconds: totalWatchTime,
           engagement_rate: totalViews > 0
             ? Math.round(((totalLikes + totalComments + totalShares) / totalViews) * 10000) / 100
             : 0,
@@ -693,28 +700,52 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
+      // Get analytics with platform info
       const { data: analytics } = await db
         .from("post_analytics")
-        .select("views, likes, comments, shares, saves, reach, impressions, social_accounts!inner(brand_id)")
+        .select("views, likes, comments, shares, saves, reach, impressions, clicks, retention_rate, watch_time_seconds, social_account_id, social_accounts!inner(brand_id, platform)")
         .eq("social_accounts.brand_id", input.brandId);
 
-      const all = analytics || [];
+      const all = (analytics || []) as any[];
 
-      return {
-        total_posts: all.length,
-        total_views: all.reduce((s: number, a: any) => s + (a.views || 0), 0),
-        total_likes: all.reduce((s: number, a: any) => s + (a.likes || 0), 0),
-        total_comments: all.reduce((s: number, a: any) => s + (a.comments || 0), 0),
-        total_shares: all.reduce((s: number, a: any) => s + (a.shares || 0), 0),
-        total_saves: all.reduce((s: number, a: any) => s + (a.saves || 0), 0),
-        total_reach: all.reduce((s: number, a: any) => s + (a.reach || 0), 0),
-        total_impressions: all.reduce((s: number, a: any) => s + (a.impressions || 0), 0),
-        avg_engagement: all.length > 0
-          ? Math.round(all.reduce((s: number, a: any) => {
-              const views = a.views || 1;
-              return s + ((a.likes || 0) + (a.comments || 0) + (a.shares || 0)) / views;
-            }, 0) / all.length * 10000) / 100
-          : 0,
-      };
+      // Aggregate by platform
+      const platformMap: Record<string, any[]> = {};
+      for (const a of all) {
+        const platform = a.social_accounts?.platform || "unknown";
+        if (!platformMap[platform]) platformMap[platform] = [];
+        platformMap[platform].push(a);
+      }
+
+      function aggregate(items: any[]) {
+        return {
+          posts: items.length,
+          views: items.reduce((s, a) => s + (a.views || 0), 0),
+          likes: items.reduce((s, a) => s + (a.likes || 0), 0),
+          comments: items.reduce((s, a) => s + (a.comments || 0), 0),
+          shares: items.reduce((s, a) => s + (a.shares || 0), 0),
+          saves: items.reduce((s, a) => s + (a.saves || 0), 0),
+          reach: items.reduce((s, a) => s + (a.reach || 0), 0),
+          impressions: items.reduce((s, a) => s + (a.impressions || 0), 0),
+          clicks: items.reduce((s, a) => s + (a.clicks || 0), 0),
+          retention_rate: items.length > 0
+            ? Math.round(items.reduce((s, a) => s + (a.retention_rate || 0), 0) / items.length * 100) / 100
+            : 0,
+          watch_time_seconds: items.reduce((s, a) => s + (a.watch_time_seconds || 0), 0),
+          engagement: items.length > 0
+            ? Math.round(items.reduce((s, a) => {
+                const views = a.views || 1;
+                return s + ((a.likes || 0) + (a.comments || 0) + (a.shares || 0)) / views;
+              }, 0) / items.length * 10000) / 100
+            : 0,
+        };
+      }
+
+      const total = aggregate(all);
+      const byPlatform: Record<string, ReturnType<typeof aggregate>> = {};
+      for (const [platform, items] of Object.entries(platformMap)) {
+        byPlatform[platform] = aggregate(items);
+      }
+
+      return { total, byPlatform };
     }),
 });

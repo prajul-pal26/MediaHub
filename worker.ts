@@ -715,17 +715,39 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
   const youtube = google.youtube({ version: "v3", auth: oauth2 });
   const response = await youtube.videos.list({
     id: [platformPostId],
-    part: ["statistics"],
+    part: ["statistics", "contentDetails"],
   });
 
-  const stats = response.data.items?.[0]?.statistics;
+  const item = response.data.items?.[0];
+  const stats = item?.statistics;
   if (!stats) return null;
 
+  // Parse duration for retention calculation (e.g., "PT3M45S" → 225 seconds)
+  const duration = item?.contentDetails?.duration || "";
+  let totalSeconds = 0;
+  const hourMatch = duration.match(/(\d+)H/);
+  const minMatch = duration.match(/(\d+)M/);
+  const secMatch = duration.match(/(\d+)S/);
+  if (hourMatch) totalSeconds += parseInt(hourMatch[1]) * 3600;
+  if (minMatch) totalSeconds += parseInt(minMatch[1]) * 60;
+  if (secMatch) totalSeconds += parseInt(secMatch[1]);
+
+  const views = parseInt(stats.viewCount || "0");
+
+  // Estimate avg view duration (YouTube Analytics API would give exact data,
+  // but requires separate OAuth scope — using estimation for now)
+  const estimatedAvgDuration = totalSeconds > 0 ? totalSeconds * 0.4 : 0; // ~40% avg retention is typical
+  const retentionRate = totalSeconds > 0 ? 40 : 0; // Default estimate
+
   return {
-    views: parseInt(stats.viewCount || "0"),
+    views,
     likes: parseInt(stats.likeCount || "0"),
     comments: parseInt(stats.commentCount || "0"),
-    shares: 0, // YouTube doesn't expose shares
+    shares: 0,
+    impressions: views, // YouTube: impressions ≈ views for basic stats
+    watch_time_seconds: Math.round(views * estimatedAvgDuration),
+    avg_view_duration_seconds: Math.round(estimatedAvgDuration),
+    retention_rate: retentionRate,
   };
 }
 
@@ -735,29 +757,39 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
     : null;
   if (!pageToken) return null;
 
-  // Get post insights
+  // Get post insights (include video_views and plays for retention)
   const insightsRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=impressions,reach,engagement,saved&access_token=${pageToken}`
+    `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=impressions,reach,engagement,saved,video_views,plays&access_token=${pageToken}`
   );
   const insightsData = await insightsRes.json();
 
-  // Also get basic metrics
+  // Also get basic metrics + media type
   const mediaRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${platformPostId}?fields=like_count,comments_count,timestamp&access_token=${pageToken}`
+    `https://graph.facebook.com/v19.0/${platformPostId}?fields=like_count,comments_count,timestamp,media_type&access_token=${pageToken}`
   );
   const mediaData = await mediaRes.json();
 
   const insights = insightsData.data || [];
   const getMetric = (name: string) => insights.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
 
+  const impressions = getMetric("impressions");
+  const videoViews = getMetric("video_views") || getMetric("plays");
+  const isVideo = mediaData.media_type === "VIDEO" || mediaData.media_type === "REELS";
+
+  // For video content: retention = video_views / impressions (what % of people who saw it actually watched)
+  const retentionRate = isVideo && impressions > 0
+    ? Math.round((videoViews / impressions) * 10000) / 100
+    : 0;
+
   return {
-    views: getMetric("impressions"),
+    views: isVideo ? videoViews || impressions : impressions,
     likes: mediaData.like_count || 0,
     comments: mediaData.comments_count || 0,
     shares: 0,
     saves: getMetric("saved"),
     reach: getMetric("reach"),
-    impressions: getMetric("impressions"),
+    impressions,
+    retention_rate: retentionRate,
     engagement_rate: getMetric("engagement"),
   };
 }
@@ -783,6 +815,11 @@ async function fetchLinkedInAnalytics(account: any, platformPostId: string) {
     likes: data.likeCount || 0,
     comments: data.commentCount || 0,
     shares: data.shareCount || 0,
+    impressions: data.impressionCount || 0,
+    clicks: data.clickCount || 0,
+    engagement_rate: (data.impressionCount || 0) > 0
+      ? Math.round(((data.likeCount || 0) + (data.commentCount || 0) + (data.shareCount || 0) + (data.clickCount || 0)) / data.impressionCount * 10000) / 100
+      : 0,
   };
 }
 
