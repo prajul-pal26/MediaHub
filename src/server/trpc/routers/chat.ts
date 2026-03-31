@@ -2,11 +2,16 @@ import { z } from "zod";
 import { router, protectedProcedure } from "../index";
 import { TRPCError } from "@trpc/server";
 import { processMessage } from "@/server/services/chat/chat-service";
-import { getLLMConfig } from "@/lib/llm";
+import { getLLMConfig, resolveLlmConfig } from "@/lib/llm";
 
 export const chatRouter = router({
   getConfig: protectedProcedure.query(async ({ ctx }) => {
-    const config = await getLLMConfig(ctx.profile.org_id);
+    const { profile } = ctx;
+    // Try multi-level resolution first (user > brand > org)
+    const resolved = await resolveLlmConfig(profile.id, profile.org_id, profile.brand_id);
+    if (resolved) return { configured: true, model: resolved.model };
+    // Fall back to legacy platform_credentials
+    const config = await getLLMConfig(profile.org_id);
     return { configured: config.configured, model: config.model };
   }),
 
