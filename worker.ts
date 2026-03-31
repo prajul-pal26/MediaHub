@@ -123,16 +123,11 @@ async function createTempPublicUrl(driveFileId: string, oauth2: any): Promise<{ 
     },
   });
 
-  // Get the direct download link
-  const file = await drive.files.get({
-    fileId: driveFileId,
-    fields: "webContentLink",
-  });
-
-  const webContentLink = file.data.webContentLink!;
+  // Use direct Google content URL (works without redirects for Instagram)
+  const directUrl = `https://lh3.googleusercontent.com/d/${driveFileId}`;
 
   return {
-    webContentLink,
+    webContentLink: directUrl,
     cleanup: async () => {
       // Remove public access
       const perms = await drive.permissions.list({ fileId: driveFileId });
@@ -324,12 +319,13 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
 
       if (isVideo) {
         mediaPayload.video_url = webContentLink;
-        mediaPayload.media_type = action === "ig_reel" ? "REELS" : (action === "ig_story" ? "STORIES" : "VIDEO");
+        if (action === "ig_reel") mediaPayload.media_type = "REELS";
+        else if (action === "ig_story") mediaPayload.media_type = "STORIES";
+        // For ig_post video, don't set media_type — Instagram defaults to feed video
       } else {
         mediaPayload.image_url = webContentLink;
-        if (action === "ig_story") {
-          mediaPayload.media_type = "STORIES";
-        }
+        if (action === "ig_story") mediaPayload.media_type = "STORIES";
+        // For ig_post image, don't set media_type — Instagram defaults to image post
       }
 
       // Create container
