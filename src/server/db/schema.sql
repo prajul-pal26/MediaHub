@@ -174,6 +174,26 @@ CREATE TABLE post_analytics (
   fetched_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- ─── Chat ───
+CREATE TABLE chat_conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+  brand_id UUID REFERENCES brands(id) ON DELETE SET NULL,
+  title TEXT DEFAULT 'New conversation',
+  message_count INTEGER DEFAULT 0,
+  last_message_at TIMESTAMPTZ DEFAULT now(),
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE chat_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID REFERENCES chat_conversations(id) ON DELETE CASCADE NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT,
+  metadata JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- API keys
 CREATE TABLE api_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
