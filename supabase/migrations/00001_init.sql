@@ -127,7 +127,7 @@ CREATE TABLE media_assets (
 -- Content posts
 CREATE TABLE content_posts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  group_id UUID REFERENCES media_groups(id) ON DELETE CASCADE NOT NULL,
+  group_id UUID REFERENCES media_groups(id) ON DELETE CASCADE,
   brand_id UUID REFERENCES brands(id) ON DELETE CASCADE NOT NULL,
   scheduled_by UUID REFERENCES users(id),
   status TEXT CHECK (status IN ('draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed')) DEFAULT 'draft',
@@ -142,7 +142,7 @@ CREATE TABLE content_posts (
 CREATE TABLE publish_jobs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   post_id UUID REFERENCES content_posts(id) ON DELETE CASCADE NOT NULL,
-  asset_id UUID REFERENCES media_assets(id) ON DELETE CASCADE NOT NULL,
+  asset_id UUID REFERENCES media_assets(id) ON DELETE CASCADE,
   social_account_id UUID REFERENCES social_accounts(id) ON DELETE CASCADE NOT NULL,
   action TEXT NOT NULL,
   resize_option TEXT CHECK (resize_option IN ('auto_crop', 'blur_bg', 'custom_crop', 'keep_original')),

@@ -888,21 +888,9 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
 
     for (const post of data.data || []) {
       try {
-        // Create media group for this historical post
-        const { data: group } = await db().from("media_groups").insert({
-          brand_id: brandId,
-          title: (post.caption || "").slice(0, 80) || "Imported post",
-          caption: post.caption || "",
-          variant_count: 1,
-          status: "published",
-          notes: "Imported from Instagram",
-        }).select().single();
-
-        if (!group) continue;
-
-        // Create content post
+        // Create content post (analytics-only, no media_group needed)
         const { data: contentPost } = await db().from("content_posts").insert({
-          group_id: group.id,
+          group_id: null,
           brand_id: brandId,
           status: "published",
           published_at: post.timestamp,
@@ -911,22 +899,10 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
 
         if (!contentPost) continue;
 
-        // Create a placeholder media asset for the FK constraint on publish_jobs
-        const { data: placeholderAsset } = await db().from("media_assets").insert({
-          group_id: group.id,
-          drive_file_id: `imported_ig_${post.id}`,
-          file_name: post.media_type === "VIDEO" ? "imported_video.mp4" : "imported_image.jpg",
-          file_type: post.media_type === "VIDEO" ? "video/mp4" : "image/jpeg",
-          metadata: { imported: true, permalink: post.permalink },
-          sort_order: 0,
-        }).select().single();
-
-        if (!placeholderAsset) continue;
-
-        // Create publish job record
+        // Create publish job record (no media_asset needed)
         await db().from("publish_jobs").insert({
           post_id: contentPost.id,
-          asset_id: placeholderAsset.id,
+          asset_id: null,
           social_account_id: account.id,
           action: post.media_type === "VIDEO" ? "ig_reel" : "ig_post",
           status: "completed",
@@ -1035,22 +1011,9 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
         const stats = video.statistics || {};
         const snippet = video.snippet || {};
 
-        // Create media group
-        const { data: group } = await db().from("media_groups").insert({
-          brand_id: brandId,
-          title: snippet.title || "Imported video",
-          caption: snippet.description || "",
-          tags: snippet.tags || [],
-          variant_count: 1,
-          status: "published",
-          notes: "Imported from YouTube",
-        }).select().single();
-
-        if (!group) continue;
-
-        // Create content post
+        // Create content post (analytics-only, no media_group needed)
         const { data: contentPost } = await db().from("content_posts").insert({
-          group_id: group.id,
+          group_id: null,
           brand_id: brandId,
           status: "published",
           published_at: snippet.publishedAt,
@@ -1067,23 +1030,10 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
           : 999;
         const isShort = totalSeconds <= 60 && !duration.includes("H");
 
-        // Create a placeholder media asset for the FK constraint
-        const { data: placeholderAsset } = await db().from("media_assets").insert({
-          group_id: group.id,
-          drive_file_id: `imported_yt_${video.id}`,
-          file_name: `${(snippet.title || "video").slice(0, 60)}.mp4`,
-          file_type: "video/mp4",
-          duration_seconds: totalSeconds < 999 ? totalSeconds : null,
-          metadata: { imported: true, video_id: video.id },
-          sort_order: 0,
-        }).select().single();
-
-        if (!placeholderAsset) continue;
-
-        // Create publish job
+        // Create publish job (no media_asset needed)
         await db().from("publish_jobs").insert({
           post_id: contentPost.id,
-          asset_id: placeholderAsset.id,
+          asset_id: null,
           social_account_id: account.id,
           action: isShort ? "yt_short" : "yt_video",
           status: "completed",
@@ -1151,6 +1101,17 @@ const historicalWorker = new Worker(
     }
 
     console.log(`[historical] Import complete: ${imported} posts imported for ${platform}`);
+
+    // Trigger analytics fetch for newly imported posts so the 6-hour cron picks up fresh data
+    if (imported > 0) {
+      try {
+        const analyticsQueue = new Queue("analytics-fetch", { connection: redis });
+        await analyticsQueue.add("post-import-fetch", { brandId });
+        console.log(`[historical] Queued analytics fetch for brand ${brandId}`);
+      } catch (e: any) {
+        console.error("[historical] Failed to queue analytics fetch:", e.message);
+      }
+    }
   },
   { connection: redis, concurrency: 1 }
 );
