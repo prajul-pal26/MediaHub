@@ -18,7 +18,10 @@ ALTER TABLE media_assets DROP CONSTRAINT IF EXISTS media_assets_tagged_platform_
 ALTER TABLE media_assets ADD CONSTRAINT media_assets_tagged_platform_check
   CHECK (tagged_platform IN ('instagram', 'youtube', 'linkedin', 'facebook', 'tiktok', 'twitter', 'snapchat'));
 
--- Update platform_comments CHECK constraint
-ALTER TABLE platform_comments DROP CONSTRAINT IF EXISTS platform_comments_platform_check;
-ALTER TABLE platform_comments ADD CONSTRAINT platform_comments_platform_check
-  CHECK (platform IN ('instagram', 'youtube', 'linkedin', 'facebook', 'tiktok', 'twitter', 'snapchat'));
+-- Update platform_comments CHECK constraint (if table exists)
+DO $$ BEGIN
+  ALTER TABLE platform_comments DROP CONSTRAINT IF EXISTS platform_comments_platform_check;
+  ALTER TABLE platform_comments ADD CONSTRAINT platform_comments_platform_check
+    CHECK (platform IN ('instagram', 'youtube', 'linkedin', 'facebook', 'tiktok', 'twitter', 'snapchat'));
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
