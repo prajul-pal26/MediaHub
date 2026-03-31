@@ -536,4 +536,141 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
 
       return saved;
     }),
+
+  // ━━━ Post Analytics (individual post stats) ━━━
+
+  getPostAnalytics: protectedProcedure
+    .input(
+      z.object({
+        brandId: z.string().uuid(),
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(50).default(20),
+        platform: z.string().optional(),
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+      assertBrandAccess(profile, input.brandId);
+
+      const offset = (input.page - 1) * input.limit;
+
+      // Get published content_posts with their analytics
+      let query = db
+        .from("content_posts")
+        .select("id, group_id, status, published_at, source, caption_overrides", { count: "exact" })
+        .eq("brand_id", input.brandId)
+        .eq("status", "published")
+        .order("published_at", { ascending: false })
+        .range(offset, offset + input.limit - 1);
+
+      const { data: posts, error, count } = await query;
+      if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
+
+      // For each post, get publish_jobs + analytics
+      const results = [];
+      for (const post of posts || []) {
+        const { data: jobs } = await db
+          .from("publish_jobs")
+          .select("id, action, platform_post_id, social_account_id, status")
+          .eq("post_id", post.id)
+          .eq("status", "completed");
+
+        // Get analytics for this post
+        const { data: analytics } = await db
+          .from("post_analytics")
+          .select("*")
+          .eq("post_id", post.id);
+
+        // Get account info
+        const accountIds = (jobs || []).map((j: any) => j.social_account_id).filter(Boolean);
+        let accounts: any[] = [];
+        if (accountIds.length > 0) {
+          const { data: accs } = await db
+            .from("social_accounts")
+            .select("id, platform, platform_username")
+            .in("id", accountIds);
+          accounts = accs || [];
+        }
+
+        // Get media group title if exists
+        let title = "Imported post";
+        if (post.group_id) {
+          const { data: group } = await db
+            .from("media_groups")
+            .select("title, caption")
+            .eq("id", post.group_id)
+            .maybeSingle();
+          if (group) title = group.title || group.caption?.slice(0, 60) || "Untitled";
+        }
+
+        // Aggregate analytics
+        const totalViews = (analytics || []).reduce((s: number, a: any) => s + (a.views || 0), 0);
+        const totalLikes = (analytics || []).reduce((s: number, a: any) => s + (a.likes || 0), 0);
+        const totalComments = (analytics || []).reduce((s: number, a: any) => s + (a.comments || 0), 0);
+        const totalShares = (analytics || []).reduce((s: number, a: any) => s + (a.shares || 0), 0);
+        const totalSaves = (analytics || []).reduce((s: number, a: any) => s + (a.saves || 0), 0);
+        const totalReach = (analytics || []).reduce((s: number, a: any) => s + (a.reach || 0), 0);
+        const totalImpressions = (analytics || []).reduce((s: number, a: any) => s + (a.impressions || 0), 0);
+
+        results.push({
+          id: post.id,
+          title,
+          source: post.source,
+          published_at: post.published_at,
+          platform: accounts[0]?.platform || "unknown",
+          account_name: accounts[0]?.platform_username || "Unknown",
+          action: (jobs || [])[0]?.action || "unknown",
+          views: totalViews,
+          likes: totalLikes,
+          comments: totalComments,
+          shares: totalShares,
+          saves: totalSaves,
+          reach: totalReach,
+          impressions: totalImpressions,
+          engagement_rate: totalViews > 0
+            ? Math.round(((totalLikes + totalComments + totalShares) / totalViews) * 10000) / 100
+            : 0,
+        });
+      }
+
+      return {
+        posts: results,
+        total: count || 0,
+        page: input.page,
+        totalPages: Math.ceil((count || 0) / input.limit),
+      };
+    }),
+
+  // ━━━ Analytics Summary (for overview page) ━━━
+
+  getSummary: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+      assertBrandAccess(profile, input.brandId);
+
+      const { data: analytics } = await db
+        .from("post_analytics")
+        .select("views, likes, comments, shares, saves, reach, impressions, social_accounts!inner(brand_id)")
+        .eq("social_accounts.brand_id", input.brandId);
+
+      const all = analytics || [];
+
+      return {
+        total_posts: all.length,
+        total_views: all.reduce((s: number, a: any) => s + (a.views || 0), 0),
+        total_likes: all.reduce((s: number, a: any) => s + (a.likes || 0), 0),
+        total_comments: all.reduce((s: number, a: any) => s + (a.comments || 0), 0),
+        total_shares: all.reduce((s: number, a: any) => s + (a.shares || 0), 0),
+        total_saves: all.reduce((s: number, a: any) => s + (a.saves || 0), 0),
+        total_reach: all.reduce((s: number, a: any) => s + (a.reach || 0), 0),
+        total_impressions: all.reduce((s: number, a: any) => s + (a.impressions || 0), 0),
+        avg_engagement: all.length > 0
+          ? Math.round(all.reduce((s: number, a: any) => {
+              const views = a.views || 1;
+              return s + ((a.likes || 0) + (a.comments || 0) + (a.shares || 0)) / views;
+            }, 0) / all.length * 10000) / 100
+          : 0,
+      };
+    }),
 });
