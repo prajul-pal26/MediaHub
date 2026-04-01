@@ -4264,7 +4264,7 @@ async function verifyStartup() {
 
   // Comment reply processing — every 30 seconds
   const commentReplyQueue = new Queue("comment-reply", { connection: redis });
-  await commentReplyQueue.add("process-pending", {}, { repeat: { every: 30 * 1000 }, jobId: "comment-reply-cron" });
+  await commentReplyQueue.add("process-pending", {}, { repeat: { every: 5 * 60 * 1000 }, jobId: "comment-reply-cron" });
   console.log("  ✓ Comment reply processing (every 30s)");
 }
 
