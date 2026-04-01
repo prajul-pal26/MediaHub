@@ -60,8 +60,12 @@ function generateCSV(data: any): string {
 }
 
 async function generatePDF(data: any) {
-  const { default: jsPDF } = await import("jspdf");
-  await import("jspdf-autotable");
+  const jspdf = await import("jspdf");
+  const { applyPlugin } = await import("jspdf-autotable");
+  const jsPDF = jspdf.default;
+
+  // Attach autoTable plugin to jsPDF
+  applyPlugin(jsPDF);
 
   const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();

@@ -1080,6 +1080,25 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       return { daily, platformComparison: platComp, topPosts };
     }),
 
+  // ━━━ Trigger Trend Forecast (manual refresh) ━━━
+
+  refreshTrendForecast: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { profile } = ctx;
+      assertBrandAccess(profile, input.brandId);
+
+      const { Queue } = await import("bullmq");
+      const { getQueueConnection } = await import("@/server/queue/connection");
+      const trendQueue = new Queue("trend-forecast", { connection: getQueueConnection() });
+
+      await trendQueue.add("forecast-brand", { brandId: input.brandId }, {
+        jobId: `forecast-${input.brandId}-${Date.now()}`,
+      });
+
+      return { queued: true, message: "Trend forecast started. Results will appear in a few seconds." };
+    }),
+
   // ━━━ Analytics Summary (for overview page) ━━━
 
   getSummary: protectedProcedure

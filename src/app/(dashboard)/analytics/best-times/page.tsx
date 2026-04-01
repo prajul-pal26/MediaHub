@@ -1,10 +1,12 @@
 "use client";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
-import { Clock, Loader2, Calendar, TrendingUp, FileText } from "lucide-react";
+import { toast } from "sonner";
+import { Clock, Loader2, Calendar, TrendingUp, FileText, RefreshCw } from "lucide-react";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -21,10 +23,17 @@ const PLATFORM_COLORS: Record<string, string> = {
 export default function BestTimesPage() {
   const { activeBrandId, loading } = useBrand();
 
-  const { data, isLoading } = trpc.analytics.getBestPostingTimes.useQuery(
+  const { data, isLoading, refetch } = trpc.analytics.getBestPostingTimes.useQuery(
     { brandId: activeBrandId! },
     { enabled: !!activeBrandId }
   );
+
+  const refreshMutation = trpc.analytics.refreshTrendForecast.useMutation({
+    onSuccess: () => {
+      toast.success("Analyzing your content — please wait...");
+    },
+    onError: (err) => toast.error(err.message),
+  });
 
   if (loading) {
     return (
@@ -84,11 +93,22 @@ export default function BestTimesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Best Times to Post</h1>
-        <p className="text-muted-foreground">
-          AI-powered posting schedule based on your historical performance
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Best Times to Post</h1>
+          <p className="text-muted-foreground">
+            AI-powered posting schedule based on your historical performance
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
+          disabled={refreshMutation.isPending}
+        >
+          <RefreshCw className={`h-4 w-4 mr-2 ${refreshMutation.isPending ? "animate-spin" : ""}`} />
+          {refreshMutation.isPending ? "Analyzing..." : "Refresh"}
+        </Button>
       </div>
 
       {!hasData ? (

@@ -229,7 +229,7 @@ const platforms: PlatformConfig[] = [
     platform: "snapchat",
     label: "Snapchat",
     shortLabel: "Snapchat",
-    icon: <svg className="h-11 w-11" viewBox="0 0 24 24" fill="#FFFC00"><path d="M12.206.793c.99 0 4.347.276 5.93 3.821.529 1.193.403 3.219.299 4.847l-.003.06c-.012.18-.022.345-.03.51.075.045.203.09.401.09.3-.016.659-.12 1.033-.301.165-.088.344-.104.464-.104.182 0 .359.029.509.09.45.149.734.479.734.838.015.449-.39.839-1.213 1.168-.089.029-.209.075-.344.119-.45.135-1.139.36-1.333.81-.09.224-.061.524.12.868l.015.015c.06.136 1.526 3.475 4.791 4.014.255.044.435.27.42.509 0 .075-.015.149-.045.225-.24.569-1.273.988-3.146 1.271-.059.091-.12.375-.164.57-.029.179-.074.36-.134.553-.076.271-.27.405-.555.405h-.03c-.135 0-.313-.031-.538-.074-.36-.075-.765-.135-1.273-.135-.3 0-.599.015-.913.074-.6.104-1.123.464-1.723.884-.853.599-1.826 1.288-3.294 1.288-.06 0-.119-.015-.18-.015h-.149c-1.468 0-2.427-.675-3.279-1.288-.599-.42-1.107-.779-1.707-.884-.314-.045-.629-.074-.928-.074-.54 0-.958.089-1.272.149-.211.043-.391.074-.54.074-.374 0-.523-.224-.583-.42-.061-.192-.09-.389-.135-.567-.046-.181-.105-.494-.166-.57-1.918-.222-2.95-.642-3.189-1.226-.031-.063-.052-.15-.055-.225-.015-.243.165-.465.42-.509 3.264-.54 4.73-3.879 4.791-4.02l.016-.029c.18-.345.224-.645.119-.869-.195-.434-.884-.658-1.332-.809-.121-.029-.24-.074-.346-.119-1.107-.435-1.257-.93-1.197-1.273.09-.479.674-.793 1.168-.793.146 0 .27.029.383.074.42.194.789.3 1.104.3.234 0 .384-.06.465-.105l-.046-.569c-.098-1.626-.225-3.651.307-4.837C7.392 1.077 10.739.807 11.727.807l.419-.015h.06"/></svg>,
+    icon: <svg className="h-11 w-11" viewBox="0 0 24 24"><path d="M12.206.793c.99 0 4.347.276 5.93 3.821.529 1.193.403 3.219.299 4.847l-.003.06c-.012.18-.022.345-.03.51.075.045.203.09.401.09.3-.016.659-.12 1.033-.301.165-.088.344-.104.464-.104.182 0 .359.029.509.09.45.149.734.479.734.838.015.449-.39.839-1.213 1.168-.089.029-.209.075-.344.119-.45.135-1.139.36-1.333.81-.09.224-.061.524.12.868l.015.015c.06.136 1.526 3.475 4.791 4.014.255.044.435.27.42.509 0 .075-.015.149-.045.225-.24.569-1.273.988-3.146 1.271-.059.091-.12.375-.164.57-.029.179-.074.36-.134.553-.076.271-.27.405-.555.405h-.03c-.135 0-.313-.031-.538-.074-.36-.075-.765-.135-1.273-.135-.3 0-.599.015-.913.074-.6.104-1.123.464-1.723.884-.853.599-1.826 1.288-3.294 1.288-.06 0-.119-.015-.18-.015h-.149c-1.468 0-2.427-.675-3.279-1.288-.599-.42-1.107-.779-1.707-.884-.314-.045-.629-.074-.928-.074-.54 0-.958.089-1.272.149-.211.043-.391.074-.54.074-.374 0-.523-.224-.583-.42-.061-.192-.09-.389-.135-.567-.046-.181-.105-.494-.166-.57-1.918-.222-2.95-.642-3.189-1.226-.031-.063-.052-.15-.055-.225-.015-.243.165-.465.42-.509 3.264-.54 4.73-3.879 4.791-4.02l.016-.029c.18-.345.224-.645.119-.869-.195-.434-.884-.658-1.332-.809-.121-.029-.24-.074-.346-.119-1.107-.435-1.257-.93-1.197-1.273.09-.479.674-.793 1.168-.793.146 0 .27.029.383.074.42.194.789.3 1.104.3.234 0 .384-.06.465-.105l-.046-.569c-.098-1.626-.225-3.651.307-4.837C7.392 1.077 10.739.807 11.727.807l.419-.015h.06" fill="#FFFC00" stroke="#000000" strokeWidth="0.5"/></svg>,
     fields: [
       { key: "client_id", label: "Client ID", type: "id" },
       { key: "client_secret", label: "Client Secret", type: "secret" },
@@ -688,6 +688,115 @@ export function PlatformCredentials() {
         open={!!selectedPlatform}
         onClose={() => setSelectedPlatform(null)}
       />
+
+      {/* OpenRouter Key Pool */}
+      <OpenRouterKeyPool />
     </div>
+  );
+}
+
+// ─── OpenRouter Key Pool Management ───
+
+function OpenRouterKeyPool() {
+  const [newKey, setNewKey] = useState("");
+  const [showInput, setShowInput] = useState(false);
+  const utils = trpc.useUtils();
+
+  const { data: pool } = trpc.credentials.getKeyPool.useQuery();
+
+  const addMutation = trpc.credentials.addPoolKey.useMutation({
+    onSuccess: (data) => {
+      toast.success(`Key added (${data.count} total in pool)`);
+      setNewKey("");
+      setShowInput(false);
+      utils.credentials.getKeyPool.invalidate();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const removeMutation = trpc.credentials.removePoolKey.useMutation({
+    onSuccess: () => {
+      toast.success("Key removed");
+      utils.credentials.getKeyPool.invalidate();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  if (!pool) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-base">OpenRouter Key Pool</CardTitle>
+            <CardDescription>
+              Add multiple API keys for automatic failover when a key runs out of credits or hits rate limits.
+              {pool.count > 0 && ` ${pool.count} backup key${pool.count !== 1 ? "s" : ""} configured.`}
+            </CardDescription>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowInput(!showInput)}
+          >
+            {showInput ? "Cancel" : "Add Key"}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {showInput && (
+          <div className="flex gap-2 mb-4">
+            <Input
+              type="password"
+              placeholder="sk-or-v1-..."
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              className="font-mono text-sm"
+            />
+            <Button
+              onClick={() => newKey.trim() && addMutation.mutate({ apiKey: newKey.trim() })}
+              disabled={!newKey.trim() || addMutation.isPending}
+            >
+              {addMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
+            </Button>
+          </div>
+        )}
+
+        {pool.count === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No backup keys configured. The primary OpenRouter key will be used. Add backup keys for automatic failover.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {pool.keys.map((key: any) => (
+              <div key={key.index} className="flex items-center justify-between p-2.5 rounded-lg border bg-muted/30">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-xs">#{key.index + 1}</Badge>
+                  <code className="text-xs font-mono text-muted-foreground">{key.masked}</code>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
+                  onClick={() => {
+                    if (confirm("Remove this API key from the pool?")) {
+                      removeMutation.mutate({ index: key.index });
+                    }
+                  }}
+                  disabled={removeMutation.isPending}
+                >
+                  <XCircle className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs text-muted-foreground mt-3">
+          Keys are tried in order. If one gets 402 (out of credits) or 429 (rate limited), the next key is used automatically. Two full rotations are attempted before failing.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
