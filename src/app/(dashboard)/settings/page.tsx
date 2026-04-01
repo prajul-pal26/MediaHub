@@ -6,8 +6,9 @@ import { UserManagement } from "@/components/settings/UserManagement";
 import { OrganizationSettings } from "@/components/settings/OrganizationSettings";
 import { LlmManagement } from "@/components/settings/LlmManagement";
 import { PersonalLlmKey } from "@/components/settings/PersonalLlmKey";
+import { AuditLog } from "@/components/settings/AuditLog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Shield, Users, Building2, Brain, Key } from "lucide-react";
+import { Shield, Users, Building2, Brain, Key, ScrollText } from "lucide-react";
 
 export default function SettingsPage() {
   const { profile, loading } = useUser();
@@ -82,6 +83,12 @@ export default function SettingsPage() {
               LLM Access
             </TabsTrigger>
           )}
+          {isSuperAdmin && (
+            <TabsTrigger value="audit" className="gap-2">
+              <ScrollText className="h-4 w-4" />
+              Audit Log
+            </TabsTrigger>
+          )}
           <TabsTrigger value="personal-llm" className="gap-2">
             <Key className="h-4 w-4" />
             Personal LLM Key
@@ -107,6 +114,12 @@ export default function SettingsPage() {
         {isSuperAdmin && (
           <TabsContent value="llm" className="mt-6">
             <LlmManagement />
+          </TabsContent>
+        )}
+
+        {isSuperAdmin && (
+          <TabsContent value="audit" className="mt-6">
+            <AuditLog />
           </TabsContent>
         )}
 

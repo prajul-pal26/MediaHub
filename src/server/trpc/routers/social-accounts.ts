@@ -142,7 +142,40 @@ export const socialAccountsRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "You can only connect accounts for your own brand" });
       }
 
-      // TODO: Validate token with a test API call per platform
+      // Validate token with a test API call per platform
+      try {
+        let testUrl = "";
+        const testHeaders: Record<string, string> = { "Authorization": `Bearer ${input.accessToken}` };
+
+        if (input.platform === "instagram") {
+          testUrl = `https://graph.facebook.com/v19.0/${input.platformUserId}?fields=id,username&access_token=${input.accessToken}`;
+        } else if (input.platform === "youtube") {
+          testUrl = `https://www.googleapis.com/youtube/v3/channels?part=id&mine=true`;
+        } else if (input.platform === "linkedin") {
+          testUrl = "https://api.linkedin.com/v2/userinfo";
+          testHeaders["LinkedIn-Version"] = "202401";
+        } else if (input.platform === "facebook") {
+          testUrl = `https://graph.facebook.com/v19.0/me?access_token=${input.accessToken}`;
+        } else if (input.platform === "tiktok") {
+          testUrl = "https://open.tiktokapis.com/v2/user/info/?fields=open_id";
+        } else if (input.platform === "twitter") {
+          testUrl = "https://api.twitter.com/2/users/me";
+        }
+
+        if (testUrl) {
+          const testRes = await fetch(testUrl, { headers: testHeaders });
+          if (!testRes.ok) {
+            const err = await testRes.text().catch(() => "");
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Token validation failed for ${input.platform}: ${testRes.status} ${err.slice(0, 200)}`,
+            });
+          }
+        }
+      } catch (e: any) {
+        if (e.code === "BAD_REQUEST") throw e;
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Token validation failed: ${e.message}` });
+      }
 
       const { data, error } = await db
         .from("social_accounts")
@@ -274,11 +307,135 @@ export const socialAccountsRouter = router({
       if (!account) throw new TRPCError({ code: "NOT_FOUND" });
       assertBrandAccess(profile, account.brand_id);
       if (!account.refresh_token_encrypted) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "No refresh token available" });
+        throw new TRPCError({ code: "BAD_REQUEST", message: "No refresh token available for this account" });
       }
 
-      // TODO: Call platform-specific refresh endpoint
-      // For now, return success placeholder
-      return { success: true, message: "Token refresh will be implemented with platform APIs" };
+      const refreshToken = decrypt(account.refresh_token_encrypted);
+      const { data: brand } = await db.from("brands").select("org_id").eq("id", account.brand_id).single();
+      if (!brand) throw new TRPCError({ code: "NOT_FOUND", message: "Brand not found" });
+
+      try {
+        if (account.platform === "instagram" || account.platform === "facebook") {
+          // Instagram/Facebook: long-lived token refresh
+          const pageToken = account.platform_metadata?.page_access_token_encrypted
+            ? decrypt(account.platform_metadata.page_access_token_encrypted)
+            : decrypt(account.access_token_encrypted);
+          const res = await fetch(
+            `https://graph.facebook.com/v19.0/oauth/access_token?grant_type=ig_refresh_token&access_token=${pageToken}`
+          );
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
+          if (data.access_token) {
+            await db.from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              token_expires_at: data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
+            }).eq("id", account.id);
+          }
+        } else if (account.platform === "youtube") {
+          // Google/YouTube OAuth2 refresh
+          const { data: creds } = await db.from("platform_credentials")
+            .select("*").eq("org_id", brand.org_id).eq("platform", "youtube").single();
+          if (!creds) throw new Error("YouTube credentials not configured");
+
+          const res = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: decrypt(creds.client_id_encrypted),
+              client_secret: decrypt(creds.client_secret_encrypted),
+              refresh_token: refreshToken,
+              grant_type: "refresh_token",
+            }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error_description || data.error);
+          if (data.access_token) {
+            await db.from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              token_expires_at: data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
+            }).eq("id", account.id);
+          }
+        } else if (account.platform === "linkedin") {
+          // LinkedIn tokens cannot be refreshed via API — user must re-authenticate
+          throw new Error("LinkedIn tokens must be refreshed by reconnecting the account");
+        } else if (account.platform === "tiktok") {
+          const { data: creds } = await db.from("platform_credentials")
+            .select("*").eq("org_id", brand.org_id).eq("platform", "tiktok").single();
+          if (!creds) throw new Error("TikTok credentials not configured");
+
+          const res = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_key: decrypt(creds.client_id_encrypted),
+              client_secret: decrypt(creds.client_secret_encrypted),
+              grant_type: "refresh_token",
+              refresh_token: refreshToken,
+            }),
+          });
+          const data = await res.json();
+          if (data.data?.access_token) {
+            await db.from("social_accounts").update({
+              access_token_encrypted: encrypt(data.data.access_token),
+              refresh_token_encrypted: data.data.refresh_token ? encrypt(data.data.refresh_token) : account.refresh_token_encrypted,
+              token_expires_at: data.data.expires_in ? new Date(Date.now() + data.data.expires_in * 1000).toISOString() : null,
+            }).eq("id", account.id);
+          } else {
+            throw new Error(data.error?.message || "TikTok token refresh failed");
+          }
+        } else if (account.platform === "twitter") {
+          const { data: creds } = await db.from("platform_credentials")
+            .select("*").eq("org_id", brand.org_id).eq("platform", "twitter").single();
+          if (!creds) throw new Error("Twitter credentials not configured");
+
+          const basicAuth = Buffer.from(`${decrypt(creds.client_id_encrypted)}:${decrypt(creds.client_secret_encrypted)}`).toString("base64");
+          const res = await fetch("https://api.twitter.com/2/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "Authorization": `Basic ${basicAuth}` },
+            body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }),
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            await db.from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              refresh_token_encrypted: data.refresh_token ? encrypt(data.refresh_token) : account.refresh_token_encrypted,
+              token_expires_at: data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
+            }).eq("id", account.id);
+          } else {
+            throw new Error(data.error_description || "Twitter token refresh failed");
+          }
+        } else if (account.platform === "snapchat") {
+          const { data: creds } = await db.from("platform_credentials")
+            .select("*").eq("org_id", brand.org_id).eq("platform", "snapchat").single();
+          if (!creds) throw new Error("Snapchat credentials not configured");
+
+          const res = await fetch("https://accounts.snapchat.com/login/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: decrypt(creds.client_id_encrypted),
+              client_secret: decrypt(creds.client_secret_encrypted),
+              grant_type: "refresh_token",
+              refresh_token: refreshToken,
+            }),
+          });
+          const data = await res.json();
+          if (data.access_token) {
+            await db.from("social_accounts").update({
+              access_token_encrypted: encrypt(data.access_token),
+              refresh_token_encrypted: data.refresh_token ? encrypt(data.refresh_token) : account.refresh_token_encrypted,
+              token_expires_at: data.expires_in ? new Date(Date.now() + data.expires_in * 1000).toISOString() : null,
+            }).eq("id", account.id);
+          } else {
+            throw new Error("Snapchat token refresh failed");
+          }
+        } else {
+          throw new Error(`Token refresh not supported for ${account.platform}`);
+        }
+
+        return { success: true, message: `${account.platform} token refreshed successfully` };
+      } catch (e: any) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: e.message });
+      }
     }),
 });

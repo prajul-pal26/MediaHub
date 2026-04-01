@@ -20,7 +20,8 @@ export async function logAudit(params: {
       source: params.source || "click",
       metadata: params.metadata || {},
     });
-  } catch {
-    // Audit logging should never block the main operation
+  } catch (err: any) {
+    // Audit logging should never block the main operation, but log the error
+    console.error("[audit] Failed to log:", err.message);
   }
 }

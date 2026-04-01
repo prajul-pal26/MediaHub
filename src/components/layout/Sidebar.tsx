@@ -20,6 +20,7 @@ import {
   Heart,
   Users,
   MessagesSquare,
+  Clock,
 } from "lucide-react";
 
 interface NavItem {
@@ -60,6 +61,7 @@ const navItems: NavItem[] = [
   { label: "Intelligence", href: "/analytics/intelligence", icon: Brain, mode: "analytics" },
   { label: "Sentiment", href: "/analytics/sentiment", icon: Heart, mode: "analytics" },
   { label: "Competitors", href: "/analytics/competitors", icon: Users, mode: "analytics" },
+  { label: "Best Times", href: "/analytics/best-times", icon: Clock, mode: "analytics" },
   { label: "Post Analytics", href: "/analytics/posts", icon: FileText, mode: "analytics" },
   { label: "Export", href: "/analytics/export", icon: Download, mode: "analytics" },
 ];

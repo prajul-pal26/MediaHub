@@ -168,7 +168,7 @@ export default function CompetitorsPage() {
                         variant="ghost"
                         size="sm"
                         className="h-8 w-8 p-0 text-muted-foreground hover:text-red-500"
-                        onClick={() => removeMutation.mutate({ brandId: activeBrandId!, handle: comp.competitor_handle, platform: comp.platform })}
+                        onClick={() => removeMutation.mutate({ brandId: activeBrandId!, handle: comp.handle, platform: comp.platform })}
                         disabled={removeMutation.isPending}
                       >
                         <Trash2 className="h-4 w-4" />

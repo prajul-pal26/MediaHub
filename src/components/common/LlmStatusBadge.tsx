@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Brain, Loader2 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
+import { useBrand } from "@/lib/hooks/use-brand";
 
 const scopeLabels: Record<string, string> = {
   user: "Personal Key",
@@ -11,8 +12,9 @@ const scopeLabels: Record<string, string> = {
 };
 
 export function LlmStatusBadge() {
+  const { activeBrandId } = useBrand();
   const { data: activeConfig, isLoading } = trpc.llm.getActiveConfig.useQuery(
-    undefined,
+    { brandId: activeBrandId || undefined },
     { refetchOnWindowFocus: false }
   );
 

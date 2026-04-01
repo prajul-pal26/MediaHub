@@ -12,14 +12,14 @@ export async function GET(request: NextRequest) {
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const db = getDb();
 
-  const { data: invitation } = await db
+  const { data: invitation, error } = await db
     .from("invitations")
     .select("id, email, role, status, expires_at")
     .eq("token_hash", tokenHash)
     .eq("status", "pending")
     .single();
 
-  if (!invitation) {
+  if (error || !invitation) {
     return NextResponse.json({ valid: false, error: "Invalid or expired invitation" });
   }
 

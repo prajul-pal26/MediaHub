@@ -323,7 +323,16 @@ export default function IntelligencePage() {
                     <span className="text-xs font-medium">
                       ~{rec.predictedViews.toLocaleString()} predicted views
                     </span>
-                    <Button size="sm" variant="outline" disabled>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const time = rec.suggestedTime || "09:00";
+                        const platform = rec.platform || "instagram";
+                        const title = encodeURIComponent(rec.title || "");
+                        window.location.href = `/calendar?suggest=true&platform=${platform}&time=${time}&title=${title}`;
+                      }}
+                    >
                       <CalendarDays className="h-3 w-3 mr-1" />
                       Add to Calendar
                     </Button>

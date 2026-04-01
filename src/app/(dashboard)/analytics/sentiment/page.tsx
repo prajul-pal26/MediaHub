@@ -79,8 +79,8 @@ export default function SentimentPage() {
   const { activeBrandId, loading } = useBrand();
 
   const { data: sentiment, isLoading } =
-    trpc.analytics.getCommentSentiment.useQuery(
-      { postId: activeBrandId! } as any,
+    trpc.analytics.getBrandSentiment.useQuery(
+      { brandId: activeBrandId! },
       { enabled: !!activeBrandId }
     );
 

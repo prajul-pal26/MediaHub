@@ -53,8 +53,24 @@ import {
   Bot,
   Settings2,
   Zap,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import Link from "next/link";
+
+// ─── Helpers ───
+function getPlatformPostUrl(platform: string, platformPostId: string, accountUsername?: string): string | null {
+  if (!platformPostId) return null;
+  switch (platform) {
+    case "instagram": return `https://www.instagram.com/p/${platformPostId}/`;
+    case "youtube": return `https://www.youtube.com/watch?v=${platformPostId}`;
+    case "linkedin": return `https://www.linkedin.com/feed/update/${platformPostId}/`;
+    case "facebook": return `https://www.facebook.com/${platformPostId}`;
+    case "tiktok": return accountUsername ? `https://www.tiktok.com/@${accountUsername}/video/${platformPostId}` : `https://www.tiktok.com/video/${platformPostId}`;
+    case "twitter": return `https://x.com/i/status/${platformPostId}`;
+    default: return null;
+  }
+}
 
 // ─── Platform Icons ───
 const PlatformIcon = ({ platform, className }: { platform: string; className?: string }) => {
@@ -245,6 +261,13 @@ function CommentCard({
 
           <p className="text-sm text-foreground line-clamp-2 mb-1">{comment.comment_text}</p>
 
+          {/* Post context */}
+          {comment.post_title && (
+            <p className="text-[10px] text-muted-foreground mb-1 truncate">
+              On: <span className="font-medium text-foreground/70">{comment.post_title}</span>
+            </p>
+          )}
+
           <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
             {comment.like_count > 0 && (
               <span className="flex items-center gap-0.5">
@@ -401,6 +424,7 @@ export function ThreadsInbox() {
       commentsQuery.refetch();
       statsQuery.refetch();
     },
+    onError: (err) => toast.error(err.message),
   });
 
   const generateReplyMutation = trpc.threads.generateReply.useMutation({
@@ -877,11 +901,40 @@ export function ThreadsInbox() {
                   </div>
                   {activeThread.postInfo && (
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      On: {activeThread.postInfo.title}
+                      On:{" "}
+                      {activeThread.postInfo.group_id ? (
+                        <Link
+                          href={`/publish/${activeThread.postInfo.group_id}`}
+                          className="text-primary hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {activeThread.postInfo.title}
+                        </Link>
+                      ) : (
+                        activeThread.postInfo.title
+                      )}
                     </p>
                   )}
                 </div>
                 <div className="flex gap-1">
+                  {activeThread.platform_post_id && (() => {
+                    const url = getPlatformPostUrl(
+                      activeThread.platform,
+                      activeThread.platform_post_id,
+                      activeThread.social_accounts?.platform_username
+                    );
+                    return url ? (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 h-8 px-3 text-xs border rounded-md hover:bg-accent transition-colors"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        Open on {activeThread.platform.charAt(0).toUpperCase() + activeThread.platform.slice(1)}
+                      </a>
+                    ) : null;
+                  })()}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -923,6 +976,44 @@ export function ThreadsInbox() {
                   </div>
                 </div>
               </div>
+
+              {/* Platform replies (other users' replies to this comment) */}
+              {activeThread.platformReplies && activeThread.platformReplies.length > 0 && (
+                <div className="space-y-3">
+                  <Separator />
+                  <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                    Platform Replies
+                  </h4>
+                  {activeThread.platformReplies.map((pr: any) => (
+                    <div key={pr.id} className="flex gap-3">
+                      <div className="h-6 w-6 rounded-full bg-muted flex items-center justify-center flex-shrink-0 mt-1">
+                        {pr.author_avatar_url ? (
+                          <img src={pr.author_avatar_url} alt="" className="h-6 w-6 rounded-full" />
+                        ) : (
+                          <span className="text-[10px] font-medium">
+                            {pr.author_username?.[0]?.toUpperCase() || "?"}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex-1 bg-muted/30 border rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-medium">{pr.author_username}</span>
+                          {pr.sentiment && <SentimentIcon sentiment={pr.sentiment} />}
+                        </div>
+                        <p className="text-sm">{pr.comment_text}</p>
+                        <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                          {pr.like_count > 0 && (
+                            <span className="flex items-center gap-0.5">
+                              <Heart className="h-2.5 w-2.5" /> {pr.like_count}
+                            </span>
+                          )}
+                          <span>{new Date(pr.comment_timestamp).toLocaleString()}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Our replies */}
               {activeThread.comment_replies && activeThread.comment_replies.length > 0 && (

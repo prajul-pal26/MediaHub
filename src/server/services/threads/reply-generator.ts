@@ -31,6 +31,7 @@ Generate a reply:`,
     userId: params.userId,
     orgId: params.orgId,
     brandId: params.brandId,
+    maxTokens: 256,
   });
 
   return result.choices?.[0]?.message?.content?.trim() || "Thank you for your comment!";

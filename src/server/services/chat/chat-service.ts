@@ -27,8 +27,8 @@ export async function processMessage(
     .order("created_at", { ascending: true })
     .limit(50);
 
-  // Build messages array for OpenRouter
-  const messages: any[] = (history || []).map((m: any) => {
+  // Build messages array — keep last 10 full, compress older ones to save tokens
+  const allHistory = (history || []).map((m: any) => {
     if (m.role === "tool_call") {
       return { role: "assistant", content: null, tool_calls: m.metadata?.tool_calls || [] };
     }
@@ -37,6 +37,28 @@ export async function processMessage(
     }
     return { role: m.role, content: m.content };
   });
+
+  const KEEP_FULL = 10;
+  let messages: any[];
+
+  if (allHistory.length > KEEP_FULL) {
+    // Compress older messages: keep only user/assistant text messages, truncate content
+    const older = allHistory.slice(0, -KEEP_FULL);
+    const recent = allHistory.slice(-KEEP_FULL);
+
+    const summary = older
+      .filter((m: any) => m.role === "user" || (m.role === "assistant" && m.content))
+      .map((m: any) => `${m.role}: ${(m.content || "").slice(0, 80)}`)
+      .join("\n");
+
+    messages = [
+      { role: "user", content: `[Previous conversation summary]\n${summary}\n[End summary]` },
+      { role: "assistant", content: "Understood, I have context from our earlier conversation." },
+      ...recent,
+    ];
+  } else {
+    messages = allHistory;
+  }
 
   messages.push({ role: "user", content: userMessage });
 

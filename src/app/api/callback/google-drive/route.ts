@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { connectDrive } from "@/server/services/drive/client";
+import { getDb } from "@/lib/supabase/db";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -38,6 +39,15 @@ export async function GET(request: NextRequest) {
   try {
     const result = await connectDrive(state.brandId, state.orgId, code);
     console.log("[google-drive callback] Success! Email:", result.email);
+
+    // Update brand setup_status to active now that Drive is connected
+    const db = getDb();
+    await db
+      .from("brands")
+      .update({ setup_status: "active" })
+      .eq("id", state.brandId)
+      .eq("org_id", state.orgId);
+    console.log("[google-drive callback] Brand setup_status set to active");
 
     // Redirect based on where the user came from
     if (state.from === "brand-setup") {

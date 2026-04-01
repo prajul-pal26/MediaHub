@@ -64,6 +64,14 @@ export const invitationsRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "You can only invite users to your own brand" });
       }
 
+      // Verify brandId belongs to this org
+      if (input.brandId) {
+        const { data: brandCheck } = await db.from("brands").select("org_id").eq("id", input.brandId).single();
+        if (!brandCheck || brandCheck.org_id !== profile.org_id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "This brand does not belong to your organization" });
+        }
+      }
+
       // Check for existing pending invitation
       const { data: existing } = await db
         .from("invitations")

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { router, protectedProcedure, assertBrandAccess } from "../index";
 import { TRPCError } from "@trpc/server";
 import { getPublishQueue } from "@/server/queue/queues";
+import { getPlatformMetadata } from "@/server/services/media/rules-engine";
 
 export const jobsRouter = router({
   list: protectedProcedure
@@ -45,7 +46,7 @@ export const jobsRouter = router({
 
       const { data: job } = await db
         .from("publish_jobs")
-        .select("*, content_posts!inner(brand_id)")
+        .select("*, content_posts!inner(brand_id, group_id, caption_overrides, media_groups:group_id(caption, tags, title, description))")
         .eq("id", input.jobId)
         .single();
 
@@ -58,6 +59,19 @@ export const jobsRouter = router({
         .update({ status: "queued", attempt_count: 0, error_message: null })
         .eq("id", input.jobId);
 
+      // Build platform metadata from the media group
+      const group = job.content_posts.media_groups;
+      const platformMeta = group
+        ? getPlatformMetadata(
+            job.action,
+            group.caption || "",
+            group.tags || [],
+            group.title,
+            group.description,
+            job.content_posts.caption_overrides
+          )
+        : {};
+
       const queue = getPublishQueue();
       await queue.add(`publish-${job.id}`, {
         publishJobId: job.id,
@@ -66,6 +80,8 @@ export const jobsRouter = router({
         socialAccountId: job.social_account_id,
         action: job.action,
         resizeOption: job.resize_option,
+        groupId: job.content_posts.group_id || "",
+        platformMeta,
       });
 
       return { success: true };

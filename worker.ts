@@ -283,7 +283,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             media_type: "CAROUSEL",
-            children: childContainerIds.join(","),
+            children: childContainerIds,
             caption,
             access_token: pageAccessToken,
           }),
@@ -1242,40 +1242,81 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
     : null;
   if (!pageToken) return null;
 
-  // Get post insights (include video_views and plays for retention)
-  const insightsRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=impressions,reach,engagement,saved,video_views,plays&access_token=${pageToken}`
-  );
-  const insightsData = await insightsRes.json();
-
-  // Also get basic metrics + media type
+  // Get basic metrics + media type first (this almost always works)
   const mediaRes = await fetchWithTimeout(
     `https://graph.facebook.com/v19.0/${platformPostId}?fields=like_count,comments_count,timestamp,media_type&access_token=${pageToken}`
   );
   const mediaData = await mediaRes.json();
+  if (mediaData.error) {
+    console.error(`[analytics] IG media fetch error for ${platformPostId}:`, mediaData.error.message);
+    return null;
+  }
 
-  const insights = insightsData.data || [];
-  const getMetric = (name: string) => insights.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
-
-  const impressions = getMetric("impressions");
-  const videoViews = getMetric("video_views") || getMetric("plays");
+  const likes = mediaData.like_count || 0;
+  const commentsCount = mediaData.comments_count || 0;
   const isVideo = mediaData.media_type === "VIDEO" || mediaData.media_type === "REELS";
 
+  // Try Insights API — may fail for some post types or insufficient permissions
+  let impressions = 0;
+  let reach = 0;
+  let saved = 0;
+  let engagementMetric = 0;
+  let videoViews = 0;
+
+  try {
+    const metrics = isVideo
+      ? "impressions,reach,saved,video_views,plays"
+      : "impressions,reach,saved";
+
+    const insightsRes = await fetchWithTimeout(
+      `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=${metrics}&access_token=${pageToken}`
+    );
+    const insightsData = await insightsRes.json();
+
+    if (!insightsData.error) {
+      const insightsList = insightsData.data || [];
+      const getMetric = (name: string) => insightsList.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+
+      impressions = getMetric("impressions");
+      reach = getMetric("reach");
+      saved = getMetric("saved");
+      videoViews = getMetric("video_views") || getMetric("plays");
+    } else {
+      console.warn(`[analytics] IG insights unavailable for ${platformPostId}: ${insightsData.error.message}`);
+    }
+  } catch (e: any) {
+    console.warn(`[analytics] IG insights fetch failed for ${platformPostId}:`, e.message);
+  }
+
+  // Determine views: use the best available metric
+  // For videos: video_views > impressions > reach
+  // For images: impressions > reach > (likes + comments as minimum floor)
+  let views: number;
+  if (isVideo) {
+    views = videoViews || impressions || reach;
+  } else {
+    views = impressions || reach;
+    // If insights returned nothing but post has engagement, use engagement sum as minimum floor
+    if (views === 0 && (likes + commentsCount) > 0) {
+      views = likes + commentsCount;
+    }
+  }
+
   // For video content: retention = video_views / impressions (what % of people who saw it actually watched)
-  const retentionRate = isVideo && impressions > 0
+  const retentionRate = isVideo && impressions > 0 && videoViews > 0
     ? Math.round((videoViews / impressions) * 10000) / 100
     : 0;
 
   return {
-    views: isVideo ? videoViews || impressions : impressions,
-    likes: mediaData.like_count || 0,
-    comments: mediaData.comments_count || 0,
+    views,
+    likes,
+    comments: commentsCount,
     shares: 0,
-    saves: getMetric("saved"),
-    reach: getMetric("reach"),
+    saves: saved,
+    reach,
     impressions,
     retention_rate: retentionRate,
-    engagement_rate: getMetric("engagement"),
+    engagement_rate: views > 0 ? Math.round((likes + commentsCount) / views * 10000) / 100 : 0,
   };
 }
 
@@ -1478,7 +1519,7 @@ const analyticsWorker = new Worker(
           }
 
           if (analytics) {
-            // Upsert analytics (update if exists, insert if not)
+            // Upsert latest snapshot in post_analytics
             const { data: existing } = await db().from("post_analytics")
               .select("id")
               .eq("post_id", post.id)
@@ -1498,6 +1539,10 @@ const analyticsWorker = new Worker(
                 fetched_at: new Date().toISOString(),
               });
             }
+
+            // Append history snapshot for progress tracking
+            await appendAnalyticsHistory(post.id, pj.social_account_id, analytics);
+
             fetched++;
           }
         } catch (e: any) {
@@ -1512,6 +1557,31 @@ const analyticsWorker = new Worker(
   },
   { connection: redis }
 );
+
+// ─── Analytics History Helper ───
+
+async function appendAnalyticsHistory(postId: string, socialAccountId: string, analytics: any) {
+  try {
+    await db().from("post_analytics_history").insert({
+      post_id: postId,
+      social_account_id: socialAccountId,
+      views: analytics.views || 0,
+      likes: analytics.likes || 0,
+      comments: analytics.comments || 0,
+      shares: analytics.shares || 0,
+      saves: analytics.saves || 0,
+      clicks: analytics.clicks || 0,
+      reach: analytics.reach || 0,
+      impressions: analytics.impressions || 0,
+      engagement_rate: analytics.engagement_rate || 0,
+      retention_rate: analytics.retention_rate || 0,
+      watch_time_seconds: analytics.watch_time_seconds || 0,
+      snapshot_at: new Date().toISOString(),
+    });
+  } catch {
+    // History append should never break the main flow
+  }
+}
 
 // ─── Historical Import Helpers ───
 
@@ -1581,9 +1651,7 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
         }
 
         // Save analytics
-        await db().from("post_analytics").insert({
-          post_id: contentPost.id,
-          social_account_id: account.id,
+        const igAnalytics = {
           views: insights.impressions || 0,
           likes: post.like_count || 0,
           comments: post.comments_count || 0,
@@ -1592,9 +1660,17 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
           reach: insights.reach || 0,
           impressions: insights.impressions || 0,
           engagement_rate: insights.engagement_rate || 0,
+        };
+
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          ...igAnalytics,
           platform_specific: { permalink: post.permalink, media_type: post.media_type },
           fetched_at: new Date().toISOString(),
         });
+
+        await appendAnalyticsHistory(contentPost.id, account.id, igAnalytics);
 
         totalImported++;
 
@@ -1674,9 +1750,9 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
 
         // Determine if short
         const duration = video.contentDetails?.duration || "";
-        const secondsMatch = duration.match(/PT(?:(\d+)M)?(\d+)S/);
-        const totalSeconds = secondsMatch
-          ? (parseInt(secondsMatch[1] || "0") * 60) + parseInt(secondsMatch[2] || "0")
+        const durationMatch = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+        const totalSeconds = durationMatch
+          ? (parseInt(durationMatch[1] || "0") * 3600) + (parseInt(durationMatch[2] || "0") * 60) + parseInt(durationMatch[3] || "0")
           : 999;
         const isShort = totalSeconds <= 60 && !duration.includes("H");
 
@@ -1692,16 +1768,22 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
         });
 
         // Save analytics
-        await db().from("post_analytics").insert({
-          post_id: contentPost.id,
-          social_account_id: account.id,
+        const ytAnalytics = {
           views: parseInt(stats.viewCount || "0"),
           likes: parseInt(stats.likeCount || "0"),
           comments: parseInt(stats.commentCount || "0"),
           shares: 0,
+        };
+
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          ...ytAnalytics,
           platform_specific: { video_id: video.id, duration: video.contentDetails?.duration },
           fetched_at: new Date().toISOString(),
         });
+
+        await appendAnalyticsHistory(contentPost.id, account.id, ytAnalytics);
 
         totalImported++;
       } catch (e: any) {
@@ -1779,16 +1861,15 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
           };
         } catch { /* metrics may not be available */ }
 
+        const fbAnalytics = { views: 0, likes: metrics.likes || 0, comments: metrics.comments || 0, shares: metrics.shares || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
-          views: 0,
-          likes: metrics.likes || 0,
-          comments: metrics.comments || 0,
-          shares: metrics.shares || 0,
+          ...fbAnalytics,
           platform_specific: { permalink: post.permalink_url, type: post.type },
           fetched_at: new Date().toISOString(),
         });
+        await appendAnalyticsHistory(contentPost.id, account.id, fbAnalytics);
 
         totalImported++;
 
@@ -1858,16 +1939,15 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
           completed_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : new Date().toISOString(),
         });
 
+        const ttAnalytics = { views: video.view_count || 0, likes: video.like_count || 0, comments: video.comment_count || 0, shares: video.share_count || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
-          views: video.view_count || 0,
-          likes: video.like_count || 0,
-          comments: video.comment_count || 0,
-          shares: video.share_count || 0,
+          ...ttAnalytics,
           platform_specific: { share_url: video.share_url, duration: video.duration },
           fetched_at: new Date().toISOString(),
         });
+        await appendAnalyticsHistory(contentPost.id, account.id, ttAnalytics);
 
         totalImported++;
       } catch (e: any) {
@@ -1938,16 +2018,14 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
         });
 
         const pm = tweet.public_metrics || {};
+        const twAnalytics = { views: pm.impression_count || 0, likes: pm.like_count || 0, comments: pm.reply_count || 0, shares: (pm.retweet_count || 0) + (pm.quote_count || 0), impressions: pm.impression_count || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
-          views: pm.impression_count || 0,
-          likes: pm.like_count || 0,
-          comments: pm.reply_count || 0,
-          shares: (pm.retweet_count || 0) + (pm.quote_count || 0),
-          impressions: pm.impression_count || 0,
+          ...twAnalytics,
           fetched_at: new Date().toISOString(),
         });
+        await appendAnalyticsHistory(contentPost.id, account.id, twAnalytics);
 
         totalImported++;
       } catch (e: any) {
@@ -2077,7 +2155,7 @@ const tokenWorker = new Worker(
 
     // ─── Refresh Social Account tokens ───
     const { data: socialAccounts } = await db().from("social_accounts")
-      .select("id, platform, platform_username, access_token_encrypted, refresh_token_encrypted, platform_metadata")
+      .select("id, brand_id, platform, platform_username, access_token_encrypted, refresh_token_encrypted, platform_metadata, brands(org_id)")
       .eq("is_active", true)
       .lt("token_expires_at", threshold);
 
@@ -2146,10 +2224,16 @@ const tokenWorker = new Worker(
           console.warn(`[token-refresh] LinkedIn token for ${acct.platform_username} is expiring — user must re-authenticate manually`);
 
         } else if (acct.platform === "facebook") {
-          // Facebook page tokens are long-lived and don't expire, but user token might
+          // Exchange short-lived token for long-lived using app credentials
+          const orgId = (acct as any).brands?.org_id;
+          const { data: fbCreds } = await db().from("platform_credentials")
+            .select("client_id_encrypted, client_secret_encrypted").eq("org_id", orgId).eq("platform", "facebook").single();
+          if (!fbCreds) { console.warn(`[token-refresh] No Facebook credentials for org — skipping ${acct.platform_username}`); continue; }
           const currentToken = decrypt(acct.access_token_encrypted);
+          const appId = decrypt(fbCreds.client_id_encrypted);
+          const appSecret = decrypt(fbCreds.client_secret_encrypted);
           const res = await fetchWithTimeout(
-            `https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${currentToken}&fb_exchange_token=${currentToken}`
+            `https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${currentToken}`
           );
           const data = await res.json();
           if (data.access_token) {
@@ -2468,6 +2552,444 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
   { connection: redis, concurrency: 2 }
 );
 
+// ─── Comment Sentiment Worker (LLM-powered) ───
+
+async function resolveLlmForOrg(orgId: string): Promise<{ apiKey: string; baseUrl: string; model: string; headers: Record<string, string>; isOpenRouter: boolean; poolKeys: string[] } | null> {
+  let apiKey = "";
+  let baseUrl = "https://openrouter.ai/api/v1";
+  let model = "deepseek/deepseek-chat-v3";
+  let headers: Record<string, string> = {};
+  let isOpenRouter = false;
+  let poolKeys: string[] = [];
+
+  const { data: orgConfig } = await db().from("llm_configurations")
+    .select("*").eq("org_id", orgId).eq("scope", "org").eq("is_active", true).limit(1).single();
+
+  if (orgConfig?.api_key_encrypted) {
+    apiKey = decrypt(orgConfig.api_key_encrypted);
+    headers = { "Authorization": `Bearer ${apiKey}` };
+    if (orgConfig.base_url) baseUrl = orgConfig.base_url;
+    if (orgConfig.default_model) model = orgConfig.default_model;
+    isOpenRouter = (orgConfig.provider === "openrouter" || baseUrl.includes("openrouter"));
+  } else {
+    // Check OpenRouter credentials with pool keys
+    const { data: orCred } = await db().from("platform_credentials")
+      .select("client_id_encrypted, metadata").eq("org_id", orgId).eq("platform", "llm_openrouter").limit(1).single();
+
+    if (orCred?.client_id_encrypted) {
+      apiKey = decrypt(orCred.client_id_encrypted);
+      headers = { "Authorization": `Bearer ${apiKey}` };
+      isOpenRouter = true;
+      if (orCred.metadata?.default_model) model = orCred.metadata.default_model;
+      // Load pool keys
+      const poolEncrypted = (orCred.metadata as any)?.pool_keys_encrypted;
+      if (Array.isArray(poolEncrypted)) {
+        for (const enc of poolEncrypted) {
+          try { poolKeys.push(decrypt(enc)); } catch {}
+        }
+      }
+    } else {
+      const { data: cred } = await db().from("platform_credentials")
+        .select("client_id_encrypted").eq("org_id", orgId).eq("platform", "llm_provider").limit(1).single();
+
+      if (cred?.client_id_encrypted) {
+        apiKey = decrypt(cred.client_id_encrypted);
+        headers = { "Authorization": `Bearer ${apiKey}` };
+      } else if (process.env.OPENROUTER_API_KEY) {
+        apiKey = process.env.OPENROUTER_API_KEY;
+        headers = { "Authorization": `Bearer ${apiKey}` };
+        isOpenRouter = true;
+      }
+    }
+  }
+
+  if (!apiKey) return null;
+  return { apiKey, baseUrl, model, headers, isOpenRouter, poolKeys };
+}
+
+/**
+ * Make an LLM call with automatic OpenRouter key rotation on 402/429 errors.
+ */
+async function workerLlmCall(
+  llm: { apiKey: string; baseUrl: string; model: string; headers: Record<string, string>; isOpenRouter: boolean; poolKeys: string[] },
+  messages: { role: string; content: string }[],
+  maxTokens = 2048
+): Promise<any> {
+  const body = JSON.stringify({ model: llm.model, max_tokens: maxTokens, messages });
+
+  if (!llm.isOpenRouter || llm.poolKeys.length === 0) {
+    // No rotation — single call
+    const response = await fetchWithTimeout(`${llm.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...llm.headers },
+      body,
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(`LLM error: ${(err as any).error?.message || response.statusText}`);
+    }
+    return response.json();
+  }
+
+  // Rotation: try primary key then pool keys, with 2 full rotations
+  const allKeys = [llm.apiKey, ...llm.poolKeys.filter(k => k !== llm.apiKey)];
+  const MAX_ROTATIONS = 2;
+
+  for (let rotation = 0; rotation < MAX_ROTATIONS; rotation++) {
+    if (rotation > 0) {
+      console.warn(`[llm-rotation] Worker retry rotation ${rotation + 1}/${MAX_ROTATIONS}...`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    for (const key of allKeys) {
+      const response = await fetchWithTimeout(`${llm.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${key}`,
+          "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "",
+          "X-Title": "MediaHub Worker",
+        },
+        body,
+      });
+
+      if (response.ok) return response.json();
+
+      const status = response.status;
+      if (status === 402 || status === 429) {
+        console.warn(`[llm-rotation] Worker key ${key.slice(0, 10)}... got ${status} — trying next`);
+        continue;
+      }
+
+      const err = await response.json().catch(() => ({}));
+      throw new Error(`LLM error: ${(err as any).error?.message || response.statusText}`);
+    }
+  }
+
+  throw new Error("All API tokens are exhausted. Please add more API keys or upgrade your plan.");
+}
+
+const sentimentWorker = new Worker(
+  "comment-sentiment",
+  async () => {
+    console.log("[comment-sentiment] Running sentiment analysis...");
+
+    const { data: brands } = await db().from("brands").select("id, org_id, name");
+
+    for (const brand of brands || []) {
+      try {
+        const llm = await resolveLlmForOrg(brand.org_id);
+        if (!llm) {
+          console.warn(`[comment-sentiment] No LLM config for org ${brand.org_id} — skipping brand ${brand.name}`);
+          continue;
+        }
+
+        // Get published posts for this brand
+        const { data: posts } = await db().from("content_posts")
+          .select("id, group_id")
+          .eq("brand_id", brand.id)
+          .eq("status", "published");
+
+        if (!posts || posts.length === 0) continue;
+
+        // Check which posts need analysis (no sentiment record or older than 24h)
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data: existing } = await db().from("comment_sentiments")
+          .select("post_id, analyzed_at")
+          .eq("brand_id", brand.id)
+          .in("post_id", posts.map((p: any) => p.id));
+
+        // Build map of last analysis time per post
+        const lastAnalyzedMap: Record<string, string> = {};
+        for (const e of existing || []) {
+          if (e.analyzed_at) lastAnalyzedMap[e.post_id] = e.analyzed_at;
+        }
+
+        // Filter: skip posts analyzed in last 24h with no new comments since
+        const postsToAnalyze: any[] = [];
+        for (const post of posts) {
+          const lastAnalyzed = lastAnalyzedMap[post.id];
+          if (lastAnalyzed && lastAnalyzed > oneDayAgo) {
+            // Already analyzed recently — check if new comments exist
+            const { count } = await db().from("platform_comments")
+              .select("id", { count: "exact", head: true })
+              .eq("post_id", post.id)
+              .eq("brand_id", brand.id)
+              .gt("created_at", lastAnalyzed);
+            if (!count || count === 0) continue; // No new comments, skip
+          }
+          postsToAnalyze.push(post);
+        }
+
+        if (postsToAnalyze.length === 0) {
+          console.log(`[comment-sentiment] ${brand.name}: no posts need re-analysis`);
+          continue;
+        }
+
+        let analyzed = 0;
+        for (const post of postsToAnalyze) {
+          // Get comments for this post
+          const { data: comments } = await db().from("platform_comments")
+            .select("comment_text, like_count, author_username")
+            .eq("post_id", post.id)
+            .eq("brand_id", brand.id)
+            .is("platform_parent_comment_id", null)
+            .limit(50);
+
+          if (!comments || comments.length === 0) continue;
+
+          // Get post title for context
+          let postTitle = "Untitled";
+          if (post.group_id) {
+            const { data: group } = await db().from("media_groups")
+              .select("title, caption").eq("id", post.group_id).single();
+            if (group) postTitle = group.title || group.caption?.slice(0, 60) || "Untitled";
+          }
+
+          const commentTexts = comments.map((c: any) =>
+            `@${c.author_username}: "${c.comment_text}" (${c.like_count || 0} likes)`
+          ).join("\n");
+
+          const systemPrompt = `You are a social media sentiment analysis AI. Analyze the following comments on a social media post and return a JSON object with:
+- overall_sentiment: "positive"|"negative"|"neutral"|"mixed"
+- sentiment_score: float from -1 (very negative) to 1 (very positive)
+- positive_count: number of positive comments
+- negative_count: number of negative comments
+- neutral_count: number of neutral comments
+- top_positive_themes: array of up to 5 recurring positive theme strings
+- top_negative_themes: array of up to 5 recurring negative theme strings
+- purchase_intent_signals: count of comments showing purchase intent (e.g. "where to buy", "price", "want this")
+- questions_count: count of comments that are questions needing response
+- summary: 1-2 sentence summary of the overall sentiment
+
+Respond ONLY with valid JSON, no markdown.`;
+
+          const userMessage = `Post: "${postTitle}"\nTotal comments: ${comments.length}\n\nComments:\n${commentTexts}`;
+
+          try {
+            const llmResult = await workerLlmCall(llm, [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userMessage },
+            ], 1024);
+            const content = llmResult.choices?.[0]?.message?.content || "{}";
+            let parsed: any;
+            try {
+              parsed = JSON.parse(content.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
+            } catch {
+              console.error(`[comment-sentiment] Failed to parse LLM response for post ${post.id}`);
+              continue;
+            }
+
+            await db().from("comment_sentiments").upsert({
+              post_id: post.id,
+              brand_id: brand.id,
+              overall_sentiment: parsed.overall_sentiment || "neutral",
+              sentiment_score: parsed.sentiment_score || 0,
+              positive_count: parsed.positive_count || 0,
+              negative_count: parsed.negative_count || 0,
+              neutral_count: parsed.neutral_count || 0,
+              top_positive_themes: parsed.top_positive_themes || [],
+              top_negative_themes: parsed.top_negative_themes || [],
+              purchase_intent_signals: parsed.purchase_intent_signals || 0,
+              questions_count: parsed.questions_count || 0,
+              summary: parsed.summary || null,
+              analyzed_at: new Date().toISOString(),
+            }, { onConflict: "post_id" });
+
+            analyzed++;
+          } catch (e: any) {
+            console.error(`[comment-sentiment] Error analyzing post ${post.id}:`, e.message);
+          }
+
+          // Small delay between LLM calls
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        if (analyzed > 0) console.log(`[comment-sentiment] ${brand.name}: analyzed ${analyzed} posts`);
+      } catch (e: any) {
+        console.error(`[comment-sentiment] Error for brand ${brand.name}:`, e.message);
+      }
+    }
+
+    console.log("[comment-sentiment] Sentiment analysis complete");
+  },
+  { connection: redis }
+);
+
+// ─── Competitor Fetch Worker ───
+
+const competitorFetchWorker = new Worker(
+  "competitor-fetch",
+  async () => {
+    console.log("[competitor-fetch] Fetching competitor data...");
+
+    const { data: allCompetitors } = await db().from("competitor_metrics").select("*");
+    if (!allCompetitors || allCompetitors.length === 0) {
+      console.log("[competitor-fetch] No competitors tracked");
+      return;
+    }
+
+    // Group by brand to resolve API credentials once per brand
+    const byBrand: Record<string, any[]> = {};
+    for (const comp of allCompetitors) {
+      if (!byBrand[comp.brand_id]) byBrand[comp.brand_id] = [];
+      byBrand[comp.brand_id].push(comp);
+    }
+
+    for (const [brandId, competitors] of Object.entries(byBrand)) {
+      const { data: brand } = await db().from("brands").select("org_id, name").eq("id", brandId).single();
+      if (!brand) continue;
+
+      for (const comp of competitors) {
+        try {
+          let followers: number | null = null;
+          let postsCount: number | null = null;
+          let avgEngagement: number | null = null;
+          let avgViews: number | null = null;
+
+          if (comp.platform === "youtube") {
+            // YouTube: use Data API v3 (public, needs API key only)
+            const { data: creds } = await db().from("platform_credentials")
+              .select("*").eq("org_id", brand.org_id).eq("platform", "youtube").single();
+
+            if (creds) {
+              // Use OAuth2 client for YouTube Data API (public endpoints)
+              const oauth2 = new google.auth.OAuth2(
+                decrypt(creds.client_id_encrypted),
+                decrypt(creds.client_secret_encrypted)
+              );
+              const youtube = google.youtube({ version: "v3", auth: oauth2 });
+
+              // Search for the channel by handle
+              const searchRes = await youtube.search.list({
+                part: ["snippet"],
+                type: ["channel"],
+                q: comp.competitor_handle,
+                maxResults: 1,
+              });
+              const channelId = searchRes.data.items?.[0]?.snippet?.channelId || (searchRes.data.items?.[0]?.id as any)?.channelId;
+
+              if (channelId) {
+                // Get channel statistics
+                const channelRes = await youtube.channels.list({
+                  part: ["statistics"],
+                  id: [channelId],
+                });
+                const stats = channelRes.data.items?.[0]?.statistics;
+
+                if (stats) {
+                  followers = parseInt(stats.subscriberCount || "0");
+                  postsCount = parseInt(stats.videoCount || "0");
+                }
+
+                // Get recent videos for avg engagement
+                const videosRes = await youtube.search.list({
+                  part: ["id"],
+                  channelId,
+                  type: ["video"],
+                  order: "date",
+                  maxResults: 5,
+                });
+                const videoIds = (videosRes.data.items || []).map((v: any) => v.id?.videoId).filter(Boolean);
+
+                if (videoIds.length > 0) {
+                  const videoStatsRes = await youtube.videos.list({
+                    part: ["statistics"],
+                    id: videoIds,
+                  });
+
+                  let totalViews = 0, totalEngagement = 0;
+                  for (const v of videoStatsRes.data.items || []) {
+                    const vs = v.statistics!;
+                    const views = parseInt(vs.viewCount || "0");
+                    const likes = parseInt(vs.likeCount || "0");
+                    const cmts = parseInt(vs.commentCount || "0");
+                    totalViews += views;
+                    if (views > 0) totalEngagement += (likes + cmts) / views;
+                  }
+                  const count = videoStatsRes.data.items?.length || 1;
+                  avgViews = Math.round(totalViews / count);
+                  avgEngagement = Math.round(totalEngagement / count * 10000) / 100;
+                }
+              }
+            }
+          } else if (comp.platform === "instagram") {
+            // Instagram: use Business Discovery API (needs brand's own IG account)
+            const { data: igAccount } = await db().from("social_accounts")
+              .select("*").eq("brand_id", brandId).eq("platform", "instagram").eq("is_active", true).limit(1).single();
+
+            if (igAccount) {
+              const pageToken = igAccount.platform_metadata?.page_access_token_encrypted
+                ? decrypt(igAccount.platform_metadata.page_access_token_encrypted)
+                : null;
+              const igUserId = igAccount.platform_user_id;
+
+              if (pageToken && igUserId) {
+                const discoveryRes = await fetchWithTimeout(
+                  `https://graph.facebook.com/v19.0/${igUserId}?fields=business_discovery.fields(followers_count,media_count,media.limit(5){like_count,comments_count,timestamp}){followers_count,media_count,media}&username=${encodeURIComponent(comp.competitor_handle)}&access_token=${pageToken}`
+                );
+                const discoveryData = await discoveryRes.json();
+                const bd = discoveryData.business_discovery;
+
+                if (bd) {
+                  followers = bd.followers_count || null;
+                  postsCount = bd.media_count || null;
+
+                  // Avg engagement from recent media
+                  const recentMedia = bd.media?.data || [];
+                  if (recentMedia.length > 0 && followers && followers > 0) {
+                    let totalEng = 0;
+                    let totalMediaViews = 0;
+                    for (const m of recentMedia) {
+                      const eng = (m.like_count || 0) + (m.comments_count || 0);
+                      totalEng += eng;
+                      totalMediaViews += eng; // For images, engagement acts as proxy
+                    }
+                    avgEngagement = Math.round(totalEng / recentMedia.length / followers * 10000) / 100;
+                    avgViews = Math.round(totalMediaViews / recentMedia.length);
+                  }
+                } else if (discoveryData.error) {
+                  console.warn(`[competitor-fetch] IG discovery failed for @${comp.competitor_handle}: ${discoveryData.error.message}`);
+                }
+              }
+            }
+          } else if (comp.platform === "linkedin") {
+            // LinkedIn does not provide public competitor data via API
+            console.log(`[competitor-fetch] LinkedIn competitor data not available via API — @${comp.competitor_handle} requires manual entry`);
+            continue;
+          } else if (comp.platform === "tiktok") {
+            // TikTok Research API is limited; skip for now
+            console.log(`[competitor-fetch] TikTok competitor API limited — @${comp.competitor_handle} requires manual entry`);
+            continue;
+          }
+
+          // Update if we got any data
+          if (followers !== null || postsCount !== null || avgEngagement !== null) {
+            const updates: Record<string, any> = { fetched_at: new Date().toISOString() };
+            if (followers !== null) updates.followers = followers;
+            if (postsCount !== null) updates.posts_count = postsCount;
+            if (avgEngagement !== null) updates.avg_engagement_rate = avgEngagement;
+            if (avgViews !== null) updates.avg_views_recent = avgViews;
+
+            await db().from("competitor_metrics")
+              .update(updates)
+              .eq("id", comp.id);
+
+            console.log(`[competitor-fetch] Updated @${comp.competitor_handle} (${comp.platform}): ${followers} followers, ${postsCount} posts, ${avgEngagement}% engagement`);
+          }
+
+          await new Promise(r => setTimeout(r, 500));
+        } catch (e: any) {
+          console.error(`[competitor-fetch] Error for @${comp.competitor_handle} (${comp.platform}):`, e.message);
+        }
+      }
+    }
+
+    console.log("[competitor-fetch] Competitor fetch complete");
+  },
+  { connection: redis }
+);
+
 // ─── Trend Forecast Worker ───
 
 const trendForecastWorker = new Worker(
@@ -2503,42 +3025,9 @@ const trendForecastWorker = new Worker(
           analytics = analyticsData || [];
         }
 
-        // Resolve LLM config
-        let apiKey = "";
-        let baseUrl = "https://openrouter.ai/api/v1";
-        let model = "deepseek/deepseek-chat-v3";
-        let headers: Record<string, string> = {};
-
-        const { data: orgConfig } = await db().from("llm_configurations")
-          .select("*")
-          .eq("org_id", brand.org_id)
-          .eq("scope", "org")
-          .eq("is_active", true)
-          .limit(1)
-          .single();
-
-        if (orgConfig?.api_key_encrypted) {
-          apiKey = decrypt(orgConfig.api_key_encrypted);
-          headers = { "Authorization": `Bearer ${apiKey}` };
-          if (orgConfig.base_url) baseUrl = orgConfig.base_url;
-        } else {
-          const { data: cred } = await db().from("platform_credentials")
-            .select("client_id_encrypted")
-            .eq("org_id", brand.org_id)
-            .eq("platform", "llm_provider")
-            .limit(1)
-            .single();
-
-          if (cred?.client_id_encrypted) {
-            apiKey = decrypt(cred.client_id_encrypted);
-            headers = { "Authorization": `Bearer ${apiKey}` };
-          } else if (process.env.OPENROUTER_API_KEY) {
-            apiKey = process.env.OPENROUTER_API_KEY;
-            headers = { "Authorization": `Bearer ${apiKey}` };
-          }
-        }
-
-        if (!apiKey) {
+        // Resolve LLM config (with key pool support)
+        const llm = await resolveLlmForOrg(brand.org_id);
+        if (!llm) {
           console.warn(`[trend-forecast] No LLM config for org ${brand.org_id} — skipping brand ${brand.name}`);
           continue;
         }
@@ -2553,13 +3042,44 @@ const trendForecastWorker = new Worker(
           }
         }
 
-        const systemPrompt = `You are a social media trend forecasting AI. Analyze the brand's content history and performance data to generate a trend forecast. Return a JSON object with:
+        // Analyze posting time performance
+        const analyticsMap: Record<string, any> = {};
+        for (const a of analytics) analyticsMap[a.post_id] = a;
+
+        const timeSlots: Record<string, { totalEngagement: number; count: number }> = {};
+        for (const post of posts || []) {
+          if (!post.published_at) continue;
+          const dt = new Date(post.published_at);
+          const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dt.getUTCDay()];
+          const hour = dt.getUTCHours();
+          const key = `${day} ${hour}:00`;
+          const pa = analyticsMap[post.id];
+          if (!timeSlots[key]) timeSlots[key] = { totalEngagement: 0, count: 0 };
+          timeSlots[key].count++;
+          if (pa && pa.views > 0) {
+            timeSlots[key].totalEngagement += ((pa.likes || 0) + (pa.comments || 0) + (pa.shares || 0)) / pa.views;
+          }
+        }
+
+        const timePerformance = Object.entries(timeSlots)
+          .map(([slot, data]) => ({
+            slot,
+            posts: data.count,
+            avgEngagement: data.count > 0 ? Math.round(data.totalEngagement / data.count * 10000) / 100 : 0,
+          }))
+          .sort((a, b) => b.avgEngagement - a.avgEngagement)
+          .slice(0, 15);
+
+        const systemPrompt = `You are a social media trend forecasting AI. Analyze the brand's content history, performance data, and posting time performance to generate a trend forecast. Return a JSON object with:
 - trending_categories (array of objects: { category: string, score: number 0-100, trend: "rising"|"stable"|"declining" })
 - trending_topics (array of objects: { topic: string, score: number 0-100 })
 - trending_formats (array of objects: { format: string, recommendation: string })
 - content_recommendations (array of strings, 5-7 actionable content ideas)
 - content_gaps (array of strings, 3-5 content opportunities the brand is missing)
 - weekly_plan (array of objects: { day: string, content_type: string, topic: string, platform: string, best_time: string })
+- best_posting_times (array of objects: { day: string, times: string[] (24h format like "09:00"), platform: string, reason: string, expected_engagement_boost: number 0-100 })
+
+For best_posting_times, analyze when this brand's posts historically perform best and recommend optimal posting windows for each day of the week. If there's insufficient data, use industry best practices for the brand's niche.
 
 Respond ONLY with valid JSON, no markdown.`;
 
@@ -2568,28 +3088,19 @@ Content categories (last 90 days): ${JSON.stringify(catCounts)}
 Top topics: ${JSON.stringify(Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).slice(0, 20))}
 Total posts: ${(posts || []).length}
 Average views: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) => s + (a.views || 0), 0) / analytics.length) : 0}
-Average engagement: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) => s + (a.engagement_rate || 0), 0) / analytics.length * 100) / 100 : 0}%`;
+Average engagement: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) => s + (a.engagement_rate || 0), 0) / analytics.length * 100) / 100 : 0}%
+Publishing time performance (slot -> avg engagement%): ${JSON.stringify(timePerformance)}`;
 
-        const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...headers },
-          body: JSON.stringify({
-            model,
-            max_tokens: 2048,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userMessage },
-            ],
-          }),
-        });
-
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}));
-          console.error(`[trend-forecast] LLM error for brand ${brand.name}:`, (err as any).error?.message || response.statusText);
+        let llmResult: any;
+        try {
+          llmResult = await workerLlmCall(llm, [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ], 2048);
+        } catch (llmErr: any) {
+          console.error(`[trend-forecast] LLM error for brand ${brand.name}:`, llmErr.message);
           continue;
         }
-
-        const llmResult = await response.json() as any;
         const content = llmResult.choices?.[0]?.message?.content || "{}";
         let parsed: any;
         try {
@@ -2614,6 +3125,7 @@ Average engagement: ${analytics.length > 0 ? Math.round(analytics.reduce((s, a) 
             content_recommendations: parsed.content_recommendations || [],
             content_gaps: parsed.content_gaps || [],
             weekly_plan: (parsed.weekly_plan || []).filter((p: any) => !p.platform || p.platform === platform),
+            best_posting_times: (parsed.best_posting_times || []).filter((p: any) => !p.platform || p.platform === platform),
             generated_by: "ai",
           }, { onConflict: "brand_id,platform,snapshot_date" });
         }
@@ -2705,6 +3217,27 @@ async function updatePredictionAccuracy() {
 
 // ─── Comment Sync Helpers ───
 
+function detectSentiment(text: string): string {
+  const lower = text.toLowerCase();
+
+  // Question detection
+  if (/\?/.test(text) || /^(how|what|when|where|why|who|which|can|could|would|is|are|do|does|will)\b/i.test(text.trim())) {
+    return "question";
+  }
+
+  const positiveWords = /\b(love|great|amazing|awesome|excellent|fantastic|beautiful|perfect|best|wonderful|thank|thanks|congrats|congratulations|fire|lit|goat|incredible|insane|stunning|brilliant|good|nice|cool|wow|bravo|superb|gorgeous|❤️|🔥|👏|💯|😍|🥰|👍|💪|🎉)\b/i;
+  const negativeWords = /\b(hate|terrible|awful|worst|bad|ugly|disgusting|horrible|trash|garbage|sucks|pathetic|disappointed|disappointing|scam|fake|fraud|boring|annoying|stupid|dumb|ridiculous|👎|😡|🤮|💩|😠)\b/i;
+
+  const posMatch = lower.match(positiveWords);
+  const negMatch = lower.match(negativeWords);
+
+  if (posMatch && !negMatch) return "positive";
+  if (negMatch && !posMatch) return "negative";
+  if (posMatch && negMatch) return "neutral";
+
+  return "neutral";
+}
+
 async function syncInstagramComments(account: any, brandId: string) {
   const pageToken = account.platform_metadata?.page_access_token_encrypted
     ? decrypt(account.platform_metadata.page_access_token_encrypted)
@@ -2726,9 +3259,9 @@ async function syncInstagramComments(account: any, brandId: string) {
 
   for (const media of mediaData.data || []) {
     try {
-      // Fetch comments for this media
+      // Fetch top-level comments for this media
       const commentsRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${media.id}/comments?fields=id,text,username,timestamp,like_count,replies{id,text,username,timestamp,like_count}&limit=50&access_token=${pageToken}`
+        `https://graph.facebook.com/v19.0/${media.id}/comments?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
       );
       const commentsData = await commentsRes.json();
       if (commentsData.error) continue;
@@ -2742,7 +3275,24 @@ async function syncInstagramComments(account: any, brandId: string) {
         .maybeSingle();
 
       for (const comment of commentsData.data || []) {
-        // Upsert comment
+        // Fetch replies for this comment separately (more reliable than nested expansion)
+        let replyCount = 0;
+        let repliesData: any[] = [];
+        try {
+          const repliesRes = await fetchWithTimeout(
+            `https://graph.facebook.com/v19.0/${comment.id}/replies?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
+          );
+          const repliesJson = await repliesRes.json();
+          if (!repliesJson.error) {
+            repliesData = repliesJson.data || [];
+            replyCount = repliesData.length;
+          }
+        } catch {
+          // Replies fetch failed — continue with top-level comment only
+        }
+
+        // Upsert top-level comment
+        const authorUsername = comment.username || "unknown";
         const { error: upsertErr } = await db().from("platform_comments")
           .upsert({
             brand_id: brandId,
@@ -2752,20 +3302,22 @@ async function syncInstagramComments(account: any, brandId: string) {
             platform: "instagram",
             platform_comment_id: comment.id,
             platform_post_id: media.id,
-            author_username: comment.username || "unknown",
-            author_profile_url: null,
+            author_username: authorUsername,
+            author_profile_url: authorUsername !== "unknown" ? `https://www.instagram.com/${authorUsername}/` : null,
             author_avatar_url: null,
-            comment_text: comment.text,
-            comment_timestamp: comment.timestamp,
+            comment_text: comment.text || "",
+            comment_timestamp: comment.timestamp || new Date().toISOString(),
             like_count: comment.like_count || 0,
-            reply_count: comment.replies?.data?.length || 0,
+            reply_count: replyCount,
+            sentiment: detectSentiment(comment.text || ""),
             synced_at: new Date().toISOString(),
           }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
         if (!upsertErr) synced++;
 
-        // Also sync nested replies as separate comments
-        for (const reply of comment.replies?.data || []) {
+        // Upsert replies
+        for (const reply of repliesData) {
+          const replyUsername = reply.username || "unknown";
           const { error: replyErr } = await db().from("platform_comments")
             .upsert({
               brand_id: brandId,
@@ -2776,10 +3328,12 @@ async function syncInstagramComments(account: any, brandId: string) {
               platform_comment_id: reply.id,
               platform_post_id: media.id,
               platform_parent_comment_id: comment.id,
-              author_username: reply.username || "unknown",
-              comment_text: reply.text,
-              comment_timestamp: reply.timestamp,
+              author_username: replyUsername,
+              author_profile_url: replyUsername !== "unknown" ? `https://www.instagram.com/${replyUsername}/` : null,
+              comment_text: reply.text || "",
+              comment_timestamp: reply.timestamp || new Date().toISOString(),
               like_count: reply.like_count || 0,
+              sentiment: detectSentiment(reply.text || ""),
               synced_at: new Date().toISOString(),
             }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -2788,7 +3342,7 @@ async function syncInstagramComments(account: any, brandId: string) {
       }
 
       // Rate limit
-      if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
+      if (synced % 20 === 0 && synced > 0) await new Promise(r => setTimeout(r, 1000));
     } catch (e: any) {
       console.error(`[comment-sync] IG comment fetch error for media ${media.id}:`, e.message);
     }
@@ -2828,6 +3382,14 @@ async function syncYouTubeComments(account: any, brandId: string, orgId: string)
     if (!videoId) continue;
 
     try {
+      // Find linked content_post once per video
+      const { data: publishJob } = await db().from("publish_jobs")
+        .select("id, post_id")
+        .eq("platform_post_id", videoId)
+        .eq("social_account_id", account.id)
+        .limit(1)
+        .maybeSingle();
+
       let pageToken: string | undefined;
       do {
         const commentsRes = await youtube.commentThreads.list({
@@ -2837,14 +3399,6 @@ async function syncYouTubeComments(account: any, brandId: string, orgId: string)
           pageToken,
           order: "time",
         });
-
-        // Find linked content_post
-        const { data: publishJob } = await db().from("publish_jobs")
-          .select("id, post_id")
-          .eq("platform_post_id", videoId)
-          .eq("social_account_id", account.id)
-          .limit(1)
-          .maybeSingle();
 
         for (const thread of commentsRes.data.items || []) {
           const topComment = thread.snippet?.topLevelComment?.snippet;
@@ -2868,6 +3422,7 @@ async function syncYouTubeComments(account: any, brandId: string, orgId: string)
               comment_timestamp: topComment.publishedAt || new Date().toISOString(),
               like_count: topComment.likeCount || 0,
               reply_count: thread.snippet?.totalReplyCount || 0,
+              sentiment: detectSentiment(topComment.textDisplay || topComment.textOriginal || ""),
               synced_at: new Date().toISOString(),
             }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -2894,6 +3449,7 @@ async function syncYouTubeComments(account: any, brandId: string, orgId: string)
                 comment_text: replySnippet.textDisplay || replySnippet.textOriginal || "",
                 comment_timestamp: replySnippet.publishedAt || new Date().toISOString(),
                 like_count: replySnippet.likeCount || 0,
+                sentiment: detectSentiment(replySnippet.textDisplay || replySnippet.textOriginal || ""),
                 synced_at: new Date().toISOString(),
               }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -2946,8 +3502,11 @@ async function syncLinkedInComments(account: any, brandId: string) {
 
       for (const comment of commentsData.elements || []) {
         const commentId = comment["$URN"] || comment.id || `li_${Date.now()}_${synced}`;
-        const actorUrn = comment.actor || "";
-        const authorName = comment.created?.actor || actorUrn.split(":").pop() || "LinkedIn User";
+        const actorUrn = comment.actor || comment.created?.actor || "";
+        const actorId = actorUrn.split(":").pop() || "";
+        const authorName = comment.authorName || comment.created?.actorDisplayName || actorId || "LinkedIn User";
+        const authorProfileUrl = actorId ? `https://www.linkedin.com/in/${actorId}` : null;
+        const authorAvatarUrl = comment.actor$?.image?.["com.linkedin.common.VectorImage"]?.rootUrl || null;
 
         const { error } = await db().from("platform_comments")
           .upsert({
@@ -2959,11 +3518,14 @@ async function syncLinkedInComments(account: any, brandId: string) {
             platform_comment_id: commentId,
             platform_post_id: pj.platform_post_id,
             author_username: authorName,
+            author_profile_url: authorProfileUrl,
+            author_avatar_url: authorAvatarUrl,
             comment_text: comment.message?.text || comment.comment || "",
             comment_timestamp: comment.created?.time
               ? new Date(comment.created.time).toISOString()
               : new Date().toISOString(),
             like_count: comment.likeCount || 0,
+            sentiment: detectSentiment(comment.message?.text || comment.comment || ""),
             synced_at: new Date().toISOString(),
           }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -3024,10 +3586,11 @@ async function syncFacebookComments(account: any, brandId: string) {
             platform_post_id: post.id,
             author_username: comment.from?.name || "Facebook User",
             author_profile_url: comment.from?.id ? `https://facebook.com/${comment.from.id}` : null,
-            author_avatar_url: null,
+            author_avatar_url: comment.from?.id ? `https://graph.facebook.com/${comment.from.id}/picture?type=small` : null,
             comment_text: comment.message || "",
             comment_timestamp: comment.created_time || new Date().toISOString(),
             like_count: comment.like_count || 0,
+            sentiment: detectSentiment(comment.message || ""),
             synced_at: new Date().toISOString(),
           }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -3115,12 +3678,14 @@ async function syncTikTokComments(account: any, brandId: string) {
               platform_post_id: videoId,
               platform_parent_comment_id: comment.parent_comment_id || null,
               author_username: comment.user?.display_name || comment.user?.unique_id || "TikTok User",
+              author_profile_url: comment.user?.unique_id ? `https://www.tiktok.com/@${comment.user.unique_id}` : null,
               author_avatar_url: comment.user?.avatar_url || null,
               comment_text: comment.text || "",
               comment_timestamp: comment.create_time
                 ? new Date(comment.create_time * 1000).toISOString()
                 : new Date().toISOString(),
               like_count: comment.likes || 0,
+              sentiment: detectSentiment(comment.text || ""),
               synced_at: new Date().toISOString(),
             }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -3207,11 +3772,13 @@ async function syncTwitterComments(account: any, brandId: string) {
             platform_comment_id: reply.id,
             platform_post_id: tweetId,
             author_username: author.username || `user_${reply.author_id}`,
+            author_profile_url: author.username ? `https://x.com/${author.username}` : null,
             author_avatar_url: author.profile_image_url || null,
             comment_text: reply.text || "",
             comment_timestamp: reply.created_at || new Date().toISOString(),
             like_count: reply.public_metrics?.like_count || 0,
             reply_count: reply.public_metrics?.reply_count || 0,
+            sentiment: detectSentiment(reply.text || ""),
             synced_at: new Date().toISOString(),
           }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
 
@@ -3222,6 +3789,67 @@ async function syncTwitterComments(account: any, brandId: string) {
       if (synced % 20 === 0) await new Promise(r => setTimeout(r, 1000));
     } catch (e: any) {
       console.error(`[comment-sync] Twitter reply fetch error for tweet ${tweetId}:`, e.message);
+    }
+  }
+
+  return synced;
+}
+
+async function syncSnapchatComments(account: any, brandId: string) {
+  const accessToken = decrypt(account.access_token_encrypted);
+  let synced = 0;
+
+  // Get recent published posts for this account
+  const { data: publishJobs } = await db().from("publish_jobs")
+    .select("id, post_id, platform_post_id")
+    .eq("social_account_id", account.id)
+    .eq("status", "completed")
+    .not("platform_post_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(25);
+
+  for (const pj of publishJobs || []) {
+    try {
+      // Snapchat Marketing API: fetch comments on a creative/media
+      const commentsRes = await fetchWithTimeout(
+        `https://adsapi.snapchat.com/v1/media/${pj.platform_post_id}/comments?limit=50`,
+        {
+          headers: { "Authorization": `Bearer ${accessToken}` },
+        }
+      );
+
+      if (!commentsRes.ok) continue;
+      const commentsData = await commentsRes.json();
+
+      for (const comment of commentsData.comments || commentsData.data || []) {
+        const commentId = comment.id || comment.comment_id || `sc_${pj.platform_post_id}_${synced}`;
+
+        const { error: upsertErr } = await db().from("platform_comments")
+          .upsert({
+            brand_id: brandId,
+            post_id: pj.post_id,
+            publish_job_id: pj.id,
+            social_account_id: account.id,
+            platform: "snapchat",
+            platform_comment_id: commentId,
+            platform_post_id: pj.platform_post_id,
+            author_username: comment.user?.display_name || comment.user?.username || "Snapchat User",
+            author_avatar_url: comment.user?.bitmoji_avatar_url || null,
+            comment_text: comment.text || comment.message || "",
+            comment_timestamp: comment.created_at
+              ? new Date(comment.created_at).toISOString()
+              : new Date().toISOString(),
+            like_count: comment.like_count || 0,
+            sentiment: detectSentiment(comment.text || comment.message || ""),
+            synced_at: new Date().toISOString(),
+          }, { onConflict: "platform,platform_comment_id", ignoreDuplicates: false });
+
+        if (!upsertErr) synced++;
+      }
+
+      if (synced % 20 === 0 && synced > 0) await new Promise(r => setTimeout(r, 1000));
+    } catch (e: any) {
+      console.error(`[comment-sync] Snapchat comment fetch error for media ${pj.platform_post_id}:`, e.message);
     }
   }
 
@@ -3271,6 +3899,8 @@ const commentSyncWorker = new Worker(
             count = await syncTikTokComments(account, brand.id);
           } else if (account.platform === "twitter") {
             count = await syncTwitterComments(account, brand.id);
+          } else if (account.platform === "snapchat") {
+            count = await syncSnapchatComments(account, brand.id);
           }
           totalSynced += count;
           console.log(`[comment-sync] ${account.platform}/@${account.platform_username}: ${count} comments synced`);
@@ -3464,6 +4094,33 @@ async function postTwitterReply(comment: any, replyText: string, account: any): 
   return data.data?.id || `tw_reply_${Date.now()}`;
 }
 
+async function postSnapchatReply(comment: any, replyText: string, account: any): Promise<string> {
+  const accessToken = decrypt(account.access_token_encrypted);
+
+  const res = await fetchWithTimeout(
+    `https://adsapi.snapchat.com/v1/media/${comment.platform_post_id}/comments`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: replyText,
+        parent_comment_id: comment.platform_comment_id,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Snapchat reply failed: ${err}`);
+  }
+
+  const data = await res.json();
+  return data.comment?.id || data.id || `sc_reply_${Date.now()}`;
+}
+
 const commentReplyWorker = new Worker(
   "comment-reply",
   async () => {
@@ -3513,6 +4170,8 @@ const commentReplyWorker = new Worker(
           platformReplyId = await postTikTokReply(comment, reply.reply_text, account);
         } else if (comment.platform === "twitter") {
           platformReplyId = await postTwitterReply(comment, reply.reply_text, account);
+        } else if (comment.platform === "snapchat") {
+          platformReplyId = await postSnapchatReply(comment, reply.reply_text, account);
         } else {
           throw new Error(`Unsupported platform: ${comment.platform}`);
         }
@@ -3588,6 +4247,16 @@ async function verifyStartup() {
   await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
   console.log("  ✓ Trend forecast cron (weekly)");
 
+  // Comment sentiment analysis — daily
+  const sentimentQueue = new Queue("comment-sentiment", { connection: redis });
+  await sentimentQueue.add("analyze-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "comment-sentiment-cron" });
+  console.log("  ✓ Comment sentiment cron (daily)");
+
+  // Competitor data fetch — daily
+  const competitorQueue = new Queue("competitor-fetch", { connection: redis });
+  await competitorQueue.add("fetch-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "competitor-fetch-cron" });
+  console.log("  ✓ Competitor fetch cron (daily)");
+
   // Comment sync — every 2 hours
   const commentSyncQueue = new Queue("comment-sync", { connection: redis });
   await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
@@ -3612,6 +4281,8 @@ process.on("SIGTERM", async () => {
   await tokenWorker.close();
   await categorizeWorker.close();
   await trendForecastWorker.close();
+  await sentimentWorker.close();
+  await competitorFetchWorker.close();
   await commentSyncWorker.close();
   await commentReplyWorker.close();
   await redis.quit();

@@ -435,4 +435,95 @@ export const credentialsRouter = router({
 
       return { redirect_uri: data.redirect_uri, status: data.status };
     }),
+
+  // ━━━ OpenRouter Key Pool Management ━━━
+
+  getKeyPool: superAdminProcedure.query(async ({ ctx }) => {
+    const { db, profile } = ctx;
+
+    const { data: cred } = await db
+      .from("platform_credentials")
+      .select("metadata")
+      .eq("org_id", profile.org_id)
+      .eq("platform", "llm_openrouter")
+      .single();
+
+    if (!cred) return { count: 0, keys: [] };
+
+    const poolEncrypted = (cred.metadata as any)?.pool_keys_encrypted || [];
+    // Return masked keys (first 10 + last 4 chars)
+    const keys = poolEncrypted.map((enc: string, i: number) => {
+      try {
+        const key = decrypt(enc);
+        return { index: i, masked: key.slice(0, 10) + "..." + key.slice(-4) };
+      } catch {
+        return { index: i, masked: "(invalid)" };
+      }
+    });
+
+    return { count: keys.length, keys };
+  }),
+
+  addPoolKey: superAdminProcedure
+    .input(z.object({ apiKey: z.string().min(10) }))
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      const { data: cred } = await db
+        .from("platform_credentials")
+        .select("metadata")
+        .eq("org_id", profile.org_id)
+        .eq("platform", "llm_openrouter")
+        .single();
+
+      if (!cred) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "OpenRouter credentials not configured. Add the primary key first." });
+      }
+
+      const metadata = (cred.metadata || {}) as Record<string, any>;
+      const poolEncrypted: string[] = metadata.pool_keys_encrypted || [];
+
+      // Encrypt and add
+      poolEncrypted.push(encrypt(input.apiKey));
+
+      await db
+        .from("platform_credentials")
+        .update({ metadata: { ...metadata, pool_keys_encrypted: poolEncrypted } })
+        .eq("org_id", profile.org_id)
+        .eq("platform", "llm_openrouter");
+
+      return { success: true, count: poolEncrypted.length };
+    }),
+
+  removePoolKey: superAdminProcedure
+    .input(z.object({ index: z.number().min(0) }))
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      const { data: cred } = await db
+        .from("platform_credentials")
+        .select("metadata")
+        .eq("org_id", profile.org_id)
+        .eq("platform", "llm_openrouter")
+        .single();
+
+      if (!cred) throw new TRPCError({ code: "NOT_FOUND" });
+
+      const metadata = (cred.metadata || {}) as Record<string, any>;
+      const poolEncrypted: string[] = metadata.pool_keys_encrypted || [];
+
+      if (input.index >= poolEncrypted.length) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid key index" });
+      }
+
+      poolEncrypted.splice(input.index, 1);
+
+      await db
+        .from("platform_credentials")
+        .update({ metadata: { ...metadata, pool_keys_encrypted: poolEncrypted } })
+        .eq("org_id", profile.org_id)
+        .eq("platform", "llm_openrouter");
+
+      return { success: true, count: poolEncrypted.length };
+    }),
 });

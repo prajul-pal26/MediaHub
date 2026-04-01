@@ -3,6 +3,7 @@ import {
   router,
   protectedProcedure,
   superAdminProcedure,
+  assertBrandAccess,
 } from "../index";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { TRPCError } from "@trpc/server";
@@ -196,63 +197,69 @@ export const llmRouter = router({
     }),
 
   /** Resolve the active config for the current user (user > brand > org) */
-  getActiveConfig: protectedProcedure.query(async ({ ctx }) => {
-    const { db, profile } = ctx;
+  getActiveConfig: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid().optional() }).optional())
+    .query(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+      // Use client-provided brandId (from brand switcher) or fall back to profile
+      const brandId = input?.brandId || profile.brand_id;
+      // Validate brand access if a specific brandId was provided
+      if (input?.brandId) assertBrandAccess(profile, input.brandId);
 
-    // 1. Check user's personal config
-    const { data: userConfig } = await db
-      .from("llm_configurations")
-      .select("*")
-      .eq("user_id", profile.id)
-      .eq("scope", "user")
-      .eq("is_active", true)
-      .single();
-    if (userConfig) return { config: sanitizeConfig(userConfig), scope: "user" as const };
-
-    // 2. Check brand access — uses the provider assigned to this brand
-    if (profile.brand_id) {
-      const { data: brandAccess } = await db
-        .from("llm_brand_access")
-        .select("*")
-        .eq("brand_id", profile.brand_id)
-        .eq("is_active", true)
-        .single();
-      if (brandAccess?.provider) {
-        // Look up the actual credentials from platform_credentials
-        const { data: cred } = await db
-          .from("platform_credentials")
-          .select("*")
-          .eq("org_id", profile.org_id)
-          .eq("platform", brandAccess.provider)
-          .single();
-        if (cred) {
-          return {
-            config: {
-              provider: brandAccess.provider,
-              api_key_masked: "••••••••" + decrypt(cred.client_id_encrypted).slice(-4),
-              default_model: cred.metadata?.default_model || null,
-              is_active: true,
-            },
-            scope: "brand" as const,
-          };
-        }
-      }
-    }
-
-    // 3. Check if user is admin (always has org access)
-    if (["super_admin", "agency_admin"].includes(profile.role)) {
-      const { data: orgConfig } = await db
+      // 1. Check user's personal config
+      const { data: userConfig } = await db
         .from("llm_configurations")
         .select("*")
-        .eq("org_id", profile.org_id)
-        .eq("scope", "org")
+        .eq("user_id", profile.id)
+        .eq("scope", "user")
         .eq("is_active", true)
         .single();
-      if (orgConfig) return { config: sanitizeConfig(orgConfig), scope: "org" as const };
-    }
+      if (userConfig) return { config: sanitizeConfig(userConfig), scope: "user" as const };
 
-    return null; // No LLM access
-  }),
+      // 2. Check brand access — uses the provider assigned to this brand
+      if (brandId) {
+        const { data: brandAccess } = await db
+          .from("llm_brand_access")
+          .select("*")
+          .eq("brand_id", brandId)
+          .eq("is_active", true)
+          .single();
+        if (brandAccess?.provider) {
+          // Look up the actual credentials from platform_credentials
+          const { data: cred } = await db
+            .from("platform_credentials")
+            .select("*")
+            .eq("org_id", profile.org_id)
+            .eq("platform", brandAccess.provider)
+            .single();
+          if (cred) {
+            return {
+              config: {
+                provider: brandAccess.provider,
+                api_key_masked: "••••••••" + decrypt(cred.client_id_encrypted).slice(-4),
+                default_model: cred.metadata?.default_model || null,
+                is_active: true,
+              },
+              scope: "brand" as const,
+            };
+          }
+        }
+      }
+
+      // 3. Check if user is admin (always has org access)
+      if (["super_admin", "agency_admin"].includes(profile.role)) {
+        const { data: orgConfig } = await db
+          .from("llm_configurations")
+          .select("*")
+          .eq("org_id", profile.org_id)
+          .eq("scope", "org")
+          .eq("is_active", true)
+          .single();
+        if (orgConfig) return { config: sanitizeConfig(orgConfig), scope: "org" as const };
+      }
+
+      return null; // No LLM access
+    }),
 
   // ━━━ Brand Access ━━━
 

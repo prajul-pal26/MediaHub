@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
 import {
   BarChart3, Eye, Heart, MessageSquare, Share2, Users, Loader2,
-  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, Clock,
+  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, Clock, ChevronDown,
 } from "lucide-react";
 
 const platformColors: Record<string, string> = {
@@ -43,6 +43,108 @@ function formatWatchTime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600 * 10) / 10}h`;
+}
+
+function PostProgressPanel({ postId }: { postId: string }) {
+  const { data, isLoading } = trpc.analytics.getPostProgress.useQuery({ postId });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-6">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!data || data.snapshots.length === 0) {
+    return (
+      <div className="text-center py-6 text-muted-foreground">
+        <p className="text-sm">No progress data yet. Data is recorded every 6 hours.</p>
+      </div>
+    );
+  }
+
+  const { snapshots, growth } = data;
+  const maxViews = Math.max(...snapshots.map((s: any) => s.views || 0), 1);
+  const maxLikes = Math.max(...snapshots.map((s: any) => s.likes || 0), 1);
+
+  return (
+    <div className="space-y-4 py-2">
+      {/* Growth summary */}
+      {growth && (
+        <div className="flex gap-4 text-xs">
+          {[
+            { label: "Views", value: growth.views, color: "text-blue-600" },
+            { label: "Likes", value: growth.likes, color: "text-pink-600" },
+            { label: "Comments", value: growth.comments, color: "text-orange-600" },
+            { label: "Shares", value: growth.shares, color: "text-green-600" },
+          ].map((g) => (
+            <div key={g.label} className="flex items-center gap-1">
+              <span className="text-muted-foreground">{g.label}:</span>
+              <span className={`font-semibold ${g.value > 0 ? g.color : "text-muted-foreground"}`}>
+                {g.value > 0 ? "+" : ""}{g.value}%
+              </span>
+            </div>
+          ))}
+          <span className="text-muted-foreground ml-auto">{snapshots.length} snapshots since {new Date(snapshots[0].timestamp).toLocaleDateString()}</span>
+        </div>
+      )}
+
+      {/* Mini bar chart - Views over time */}
+      <div>
+        <p className="text-xs font-medium text-muted-foreground mb-1">Views Over Time</p>
+        <div className="flex items-end gap-[2px] h-16">
+          {snapshots.map((s: any, i: number) => {
+            const height = maxViews > 0 ? Math.max((s.views / maxViews) * 100, 2) : 2;
+            return (
+              <div
+                key={i}
+                className="flex-1 bg-blue-400 hover:bg-blue-600 rounded-t transition-colors relative group min-w-[3px]"
+                style={{ height: `${height}%` }}
+                title={`${new Date(s.timestamp).toLocaleString()}: ${s.views.toLocaleString()} views`}
+              >
+                <div className="hidden group-hover:block absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-popover border rounded px-2 py-1 text-[10px] whitespace-nowrap z-10 shadow-md">
+                  {s.views.toLocaleString()} views
+                  <br />
+                  {new Date(s.timestamp).toLocaleString()}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Mini bar chart - Engagement (likes) over time */}
+      <div>
+        <p className="text-xs font-medium text-muted-foreground mb-1">Likes Over Time</p>
+        <div className="flex items-end gap-[2px] h-12">
+          {snapshots.map((s: any, i: number) => {
+            const height = maxLikes > 0 ? Math.max((s.likes / maxLikes) * 100, 2) : 2;
+            return (
+              <div
+                key={i}
+                className="flex-1 bg-pink-400 hover:bg-pink-600 rounded-t transition-colors relative group min-w-[3px]"
+                style={{ height: `${height}%` }}
+                title={`${new Date(s.timestamp).toLocaleString()}: ${s.likes.toLocaleString()} likes`}
+              >
+                <div className="hidden group-hover:block absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-popover border rounded px-2 py-1 text-[10px] whitespace-nowrap z-10 shadow-md">
+                  {s.likes.toLocaleString()} likes
+                  <br />
+                  {new Date(s.timestamp).toLocaleString()}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Timeline details */}
+      <div className="flex justify-between text-[10px] text-muted-foreground">
+        <span>{new Date(snapshots[0].timestamp).toLocaleDateString()}</span>
+        <span>{new Date(snapshots[snapshots.length - 1].timestamp).toLocaleDateString()}</span>
+      </div>
+    </div>
+  );
 }
 
 function StatCard({ icon, label, total, byPlatform, format }: {
@@ -80,6 +182,7 @@ export default function PostAnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
   const { profile } = useUser();
   const [page, setPage] = useState(1);
+  const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
   const utils = trpc.useUtils();
 
   const canDelete = profile && ["super_admin", "agency_admin", "brand_owner"].includes(profile.role);
@@ -259,10 +362,19 @@ export default function PostAnalyticsPage() {
                   </TableHeader>
                   <TableBody>
                     {posts.map((post: any) => (
-                      <TableRow key={post.id}>
+                      <React.Fragment key={post.id}>
+                      <TableRow
+                        className="cursor-pointer hover:bg-accent/50"
+                        onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)}
+                      >
                         <TableCell className="max-w-[180px]">
-                          <p className="text-sm font-medium truncate">{post.title}</p>
-                          <p className="text-xs text-muted-foreground">@{post.account_name}</p>
+                          <div className="flex items-center gap-1">
+                            <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform ${expandedPostId === post.id ? "rotate-180" : ""}`} />
+                            <div>
+                              <p className="text-sm font-medium truncate">{post.title}</p>
+                              <p className="text-xs text-muted-foreground">@{post.account_name}</p>
+                            </div>
+                          </div>
                         </TableCell>
                         <TableCell>
                           <span className="text-xs flex items-center gap-1">
@@ -320,6 +432,14 @@ export default function PostAnalyticsPage() {
                           </TableCell>
                         )}
                       </TableRow>
+                      {expandedPostId === post.id && (
+                        <TableRow>
+                          <TableCell colSpan={canDelete ? 13 : 12} className="bg-muted/30 p-4">
+                            <PostProgressPanel postId={post.id} />
+                          </TableCell>
+                        </TableRow>
+                      )}
+                      </React.Fragment>
                     ))}
                   </TableBody>
                 </Table>

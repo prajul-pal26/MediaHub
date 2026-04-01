@@ -18,7 +18,10 @@ export function ChatInterface() {
   const [showSidebar, setShowSidebar] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const { data: config } = trpc.chat.getConfig.useQuery();
+  const { data: config } = trpc.chat.getConfig.useQuery(
+    { brandId: activeBrandId || undefined },
+    { enabled: true }
+  );
   const { data: conversations = [], refetch: refetchConvs } = trpc.chat.getConversations.useQuery();
   const { data: messages = [], refetch: refetchMessages } = trpc.chat.getMessages.useQuery(
     { conversationId: conversationId! },

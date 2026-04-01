@@ -177,6 +177,25 @@ CREATE TABLE post_analytics (
   fetched_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- ─── Post Analytics History (time-series snapshots for progress charts) ───
+CREATE TABLE post_analytics_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  post_id UUID REFERENCES content_posts(id) ON DELETE CASCADE NOT NULL,
+  social_account_id UUID REFERENCES social_accounts(id) ON DELETE SET NULL,
+  views INTEGER DEFAULT 0,
+  likes INTEGER DEFAULT 0,
+  comments INTEGER DEFAULT 0,
+  shares INTEGER DEFAULT 0,
+  saves INTEGER DEFAULT 0,
+  clicks INTEGER DEFAULT 0,
+  reach INTEGER DEFAULT 0,
+  impressions INTEGER DEFAULT 0,
+  engagement_rate FLOAT DEFAULT 0,
+  retention_rate FLOAT DEFAULT 0,
+  watch_time_seconds INTEGER DEFAULT 0,
+  snapshot_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
 -- ─── Chat ───
 CREATE TABLE chat_conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -327,6 +346,7 @@ CREATE TABLE trend_snapshots (
   content_recommendations JSONB DEFAULT '[]',
   content_gaps JSONB DEFAULT '[]',
   weekly_plan JSONB DEFAULT '[]',
+  best_posting_times JSONB DEFAULT '[]',
   generated_by TEXT DEFAULT 'ai',
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE(brand_id, platform, snapshot_date)
@@ -367,7 +387,8 @@ CREATE TABLE comment_sentiments (
   questions_count INTEGER DEFAULT 0,
   summary TEXT,
   analyzed_at TIMESTAMPTZ DEFAULT now(),
-  created_at TIMESTAMPTZ DEFAULT now()
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(post_id)
 );
 
 -- ─── Competitor Metrics ───
@@ -912,6 +933,7 @@ CREATE INDEX idx_platform_comments_timestamp ON platform_comments(comment_timest
 CREATE INDEX idx_platform_comments_social_account ON platform_comments(social_account_id);
 CREATE INDEX idx_platform_comments_brand_status ON platform_comments(brand_id, status);
 CREATE INDEX idx_platform_comments_brand_platform ON platform_comments(brand_id, platform);
+CREATE INDEX idx_platform_comments_parent ON platform_comments(brand_id, platform_parent_comment_id);
 CREATE INDEX idx_comment_replies_comment_id ON comment_replies(comment_id);
 CREATE INDEX idx_comment_replies_brand_id ON comment_replies(brand_id);
 CREATE INDEX idx_comment_replies_status ON comment_replies(status);

@@ -27,11 +27,12 @@ export const threadsRouter = router({
       let query = db
         .from("platform_comments")
         .select(
-          "*, social_accounts(id, platform, platform_username), comment_replies(id, reply_text, status, sent_at, replied_by)",
+          "*, social_accounts(id, platform, platform_username), comment_replies(id, reply_text, status, sent_at, replied_by), content_posts(id, group_id, media_groups:group_id(title, caption))",
           { count: "exact" }
         )
         .eq("brand_id", input.brandId)
         .eq("is_hidden", false)
+        .is("platform_parent_comment_id", null)
         .order("comment_timestamp", { ascending: false })
         .range(offset, offset + input.limit - 1);
 
@@ -44,8 +45,19 @@ export const threadsRouter = router({
       const { data, error, count } = await query;
       if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
+      // Flatten post context for easy frontend access
+      const comments = (data || []).map((c: any) => {
+        const post = c.content_posts;
+        const group = post?.media_groups;
+        return {
+          ...c,
+          post_title: group?.title || group?.caption?.slice(0, 60) || (post ? "Untitled post" : null),
+          post_group_id: post?.group_id || null,
+        };
+      });
+
       return {
-        comments: data || [],
+        comments,
         total: count || 0,
         page: input.page,
         totalPages: Math.ceil((count || 0) / input.limit),
@@ -92,6 +104,15 @@ export const threadsRouter = router({
         }
       }
 
+      // Fetch nested platform replies (other users' replies to this comment)
+      const { data: platformReplies } = await db
+        .from("platform_comments")
+        .select("id, platform, author_username, author_avatar_url, author_profile_url, comment_text, comment_timestamp, like_count, sentiment, platform_comment_id")
+        .eq("platform_parent_comment_id", comment.platform_comment_id)
+        .eq("platform", comment.platform)
+        .eq("brand_id", comment.brand_id)
+        .order("comment_timestamp", { ascending: true });
+
       // Mark as read if unread
       if (comment.status === "unread") {
         await db
@@ -100,7 +121,7 @@ export const threadsRouter = router({
           .eq("id", input.commentId);
       }
 
-      return { ...comment, postInfo };
+      return { ...comment, postInfo, platformReplies: platformReplies || [] };
     }),
 
   // ━━━ Reply to Comment ━━━
@@ -117,7 +138,7 @@ export const threadsRouter = router({
 
       const { data: comment } = await db
         .from("platform_comments")
-        .select("id, brand_id, platform, platform_comment_id, platform_post_id, social_account_id")
+        .select("id, brand_id, platform, platform_comment_id, platform_post_id, social_account_id, author_username")
         .eq("id", input.commentId)
         .single();
 
@@ -126,6 +147,11 @@ export const threadsRouter = router({
 
       assertBrandAccess(profile, comment.brand_id);
 
+      // Substitute template variables
+      const replyText = input.replyText
+        .replace(/\{\{author\}\}/gi, comment.author_username || "")
+        .replace(/\{\{platform\}\}/gi, comment.platform || "");
+
       // Create reply record
       const { data: reply, error } = await db
         .from("comment_replies")
@@ -133,7 +159,7 @@ export const threadsRouter = router({
           comment_id: input.commentId,
           brand_id: comment.brand_id,
           replied_by: profile.id,
-          reply_text: input.replyText,
+          reply_text: replyText,
           template_id: input.templateId || null,
           status: "pending",
         })
@@ -182,7 +208,7 @@ export const threadsRouter = router({
       // Verify all comments belong to accessible brands
       const { data: comments } = await db
         .from("platform_comments")
-        .select("id, brand_id, platform, platform_comment_id, platform_post_id, social_account_id")
+        .select("id, brand_id, platform, platform_comment_id, platform_post_id, social_account_id, author_username")
         .in("id", input.commentIds);
 
       if (!comments || comments.length === 0)
@@ -194,12 +220,14 @@ export const threadsRouter = router({
         assertBrandAccess(profile, bid);
       }
 
-      // Create reply records for all
+      // Create reply records for all (with template variable substitution)
       const replies = comments.map((comment: any) => ({
         comment_id: comment.id,
         brand_id: comment.brand_id,
         replied_by: profile.id,
-        reply_text: input.replyText,
+        reply_text: input.replyText
+          .replace(/\{\{author\}\}/gi, comment.author_username || "")
+          .replace(/\{\{platform\}\}/gi, comment.platform || ""),
         template_id: input.templateId || null,
         status: "pending",
       }));
@@ -268,7 +296,8 @@ export const threadsRouter = router({
         .from("platform_comments")
         .select("status, platform, sentiment")
         .eq("brand_id", input.brandId)
-        .eq("is_hidden", false);
+        .eq("is_hidden", false)
+        .is("platform_parent_comment_id", null);
 
       const all = comments || [];
       const byStatus: Record<string, number> = {};
@@ -560,18 +589,10 @@ export const threadsRouter = router({
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
-      // We'll queue a sync job via BullMQ
-      // For now, return a status — the actual sync happens in the worker
-      const Redis = (await import("ioredis")).default;
-      const { Queue } = await import("bullmq");
-      const redisUrl = process.env.REDIS_URL;
-      if (!redisUrl) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Redis not configured" });
-
-      const redisConn = new Redis(redisUrl, { maxRetriesPerRequest: null });
-      const syncQueue = new Queue("comment-sync", { connection: redisConn });
+      const { getCommentSyncQueue } = await import("@/server/queue/queues");
+      const syncQueue = getCommentSyncQueue();
 
       await syncQueue.add("sync-brand", { brandId: input.brandId }, { jobId: `sync-${input.brandId}-${Date.now()}` });
-      await redisConn.quit();
 
       return { queued: true, message: "Comment sync started" };
     }),

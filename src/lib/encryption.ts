@@ -24,8 +24,13 @@ export function encrypt(text: string): string {
 }
 
 export function decrypt(encryptedText: string): string {
+  if (!encryptedText) throw new Error("Cannot decrypt empty value");
+
+  const parts = encryptedText.split(":");
+  if (parts.length !== 3) throw new Error("Invalid encrypted format — expected iv:tag:ciphertext");
+
+  const [ivHex, tagHex, encrypted] = parts;
   const key = getKey();
-  const [ivHex, tagHex, encrypted] = encryptedText.split(":");
 
   const iv = Buffer.from(ivHex, "hex");
   const tag = Buffer.from(tagHex, "hex");

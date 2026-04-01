@@ -363,6 +363,8 @@ export async function chatCompletion(params: {
   brandId?: string | null;
   /** Override config entirely (skips resolution) */
   configOverride?: LLMConfig;
+  /** Override max tokens (default 4096) */
+  maxTokens?: number;
 }): Promise<any> {
   let config: LLMConfig;
 
@@ -402,8 +404,8 @@ export async function chatCompletion(params: {
   if (config.provider === "anthropic") {
     result = await callAnthropic(config, params);
   } else {
-    // OpenAI-compatible (OpenRouter, OpenAI, Groq, custom)
-    result = await callOpenAICompatible(config, params);
+    // OpenAI-compatible (OpenRouter, OpenAI, Groq, custom) — with key rotation for OpenRouter
+    result = await callOpenAICompatible(config, params, params.orgId);
   }
 
   // Log usage (non-blocking)
@@ -430,33 +432,138 @@ export async function chatCompletion(params: {
   return result;
 }
 
-// ─── OpenAI-compatible call (OpenRouter, OpenAI, Groq, custom) ───
+// ─── OpenRouter Key Pool Rotation ───
 
-async function callOpenAICompatible(config: LLMConfig, params: any): Promise<any> {
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...config.headers,
-    },
-    body: JSON.stringify({
-      model: config.model,
-      max_tokens: 4096,
-      messages: [
-        { role: "system", content: params.systemPrompt },
-        ...params.messages,
-      ],
-      tools: params.tools?.length ? params.tools : undefined,
-      tool_choice: params.tools?.length ? "auto" : undefined,
-    }),
-  });
+/**
+ * Get all available OpenRouter API keys for an org (primary + pool keys).
+ * Pool keys are stored encrypted in platform_credentials.metadata.pool_keys_encrypted.
+ */
+async function getOpenRouterKeyPool(orgId: string): Promise<string[]> {
+  const db = getDb();
+  const { data: cred } = await db
+    .from("platform_credentials")
+    .select("client_id_encrypted, metadata")
+    .eq("org_id", orgId)
+    .eq("platform", "llm_openrouter")
+    .single();
 
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(`LLM error (${config.provider}): ${err.error?.message || response.statusText}`);
+  if (!cred) return [];
+
+  const keys: string[] = [];
+
+  // Primary key
+  try {
+    keys.push(decrypt(cred.client_id_encrypted));
+  } catch {}
+
+  // Pool keys
+  const poolEncrypted = (cred.metadata as any)?.pool_keys_encrypted;
+  if (Array.isArray(poolEncrypted)) {
+    for (const enc of poolEncrypted) {
+      try {
+        keys.push(decrypt(enc));
+      } catch {}
+    }
   }
 
-  return response.json();
+  return keys;
+}
+
+/**
+ * Make an OpenRouter API call with automatic key rotation.
+ * Tries pool keys in order on 402 (payment required) or 429 (rate limited).
+ */
+async function callWithKeyRotation(
+  config: LLMConfig,
+  body: any,
+  orgId?: string
+): Promise<any> {
+  // Only use rotation for OpenRouter
+  if (config.provider !== "openrouter" || !orgId) {
+    return singleCallOpenAI(config, body);
+  }
+
+  const poolKeys = await getOpenRouterKeyPool(orgId);
+  if (poolKeys.length === 0) {
+    return singleCallOpenAI(config, body);
+  }
+
+  // Ensure the current key is first, then pool keys (deduplicated)
+  const orderedKeys = [config.apiKey, ...poolKeys.filter(k => k !== config.apiKey)];
+  const MAX_ROTATIONS = 2;
+
+  for (let rotation = 0; rotation < MAX_ROTATIONS; rotation++) {
+    if (rotation > 0) {
+      console.warn(`[llm-rotation] Starting retry rotation ${rotation + 1}/${MAX_ROTATIONS}...`);
+      // Brief pause before retrying all keys (rate limits may have cleared)
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    for (const key of orderedKeys) {
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${key}`,
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "",
+        "X-Title": "MediaHub",
+      };
+
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const status = response.status;
+      const err = await response.json().catch(() => ({}));
+      const errMsg = (err as any).error?.message || response.statusText;
+
+      // 402 = payment required (out of credits), 429 = rate limited — try next key
+      if (status === 402 || status === 429) {
+        console.warn(`[llm-rotation] Key ${key.slice(0, 10)}... got ${status}: ${errMsg} — trying next key`);
+        continue;
+      }
+
+      // Any other error (400, 401, 500 etc.) — don't rotate, throw immediately
+      throw new Error(`LLM error (openrouter): ${errMsg}`);
+    }
+  }
+
+  throw new Error("All API tokens are exhausted. Please add more API keys or upgrade your plan.");
+}
+
+function singleCallOpenAI(config: LLMConfig, body: any): Promise<any> {
+  return fetch(`${config.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...config.headers },
+    body: JSON.stringify(body),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(`LLM error (${config.provider}): ${(err as any).error?.message || response.statusText}`);
+    }
+    return response.json();
+  });
+}
+
+// ─── OpenAI-compatible call (OpenRouter, OpenAI, Groq, custom) ───
+
+async function callOpenAICompatible(config: LLMConfig, params: any, orgId?: string): Promise<any> {
+  const body = {
+    model: config.model,
+    max_tokens: params.maxTokens || 4096,
+    messages: [
+      { role: "system", content: params.systemPrompt },
+      ...params.messages,
+    ],
+    tools: params.tools?.length ? params.tools : undefined,
+    tool_choice: params.tools?.length ? "auto" : undefined,
+  };
+
+  return callWithKeyRotation(config, body, orgId);
 }
 
 // ─── Anthropic native call (converts to/from OpenAI format) ───

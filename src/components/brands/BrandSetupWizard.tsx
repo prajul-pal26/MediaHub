@@ -137,6 +137,11 @@ export function BrandSetupWizard() {
 
   const verifyMutation = trpc.drive.verify.useMutation();
 
+  const connectOAuthMutation = trpc.socialAccounts.initiateOAuth.useMutation({
+    onSuccess: (data) => { window.location.href = data.url; },
+    onError: (error) => toast.error(error.message),
+  });
+
   const updateBrandMutation = trpc.brands.update.useMutation({
     onSuccess: () => {
       toast.success("Brand setup complete!");
@@ -396,33 +401,31 @@ export function BrandSetupWizard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4">
-              <Button variant="outline" className="h-16 justify-start gap-4" disabled>
-                <InstagramIcon className="h-6 w-6 text-pink-500" />
-                <div className="text-left">
-                  <p className="font-medium">Connect Instagram</p>
-                  <p className="text-xs text-muted-foreground">Via Facebook/Meta OAuth</p>
-                </div>
-              </Button>
-
-              <Button variant="outline" className="h-16 justify-start gap-4" disabled>
-                <YoutubeIcon className="h-6 w-6 text-red-500" />
-                <div className="text-left">
-                  <p className="font-medium">Connect YouTube</p>
-                  <p className="text-xs text-muted-foreground">Via Google OAuth</p>
-                </div>
-              </Button>
-
-              <Button variant="outline" className="h-16 justify-start gap-4" disabled>
-                <LinkedInIcon />
-                <div className="text-left">
-                  <p className="font-medium">Connect LinkedIn</p>
-                  <p className="text-xs text-muted-foreground">Via LinkedIn OAuth</p>
-                </div>
-              </Button>
+              {([
+                { platform: "instagram" as const, label: "Connect Instagram", sub: "Via Facebook/Meta OAuth", icon: <InstagramIcon className="h-6 w-6 text-pink-500" /> },
+                { platform: "youtube" as const, label: "Connect YouTube", sub: "Via Google OAuth", icon: <YoutubeIcon className="h-6 w-6 text-red-500" /> },
+                { platform: "linkedin" as const, label: "Connect LinkedIn", sub: "Via LinkedIn OAuth", icon: <LinkedInIcon /> },
+              ]).map((p) => (
+                <Button
+                  key={p.platform}
+                  variant="outline"
+                  className="h-16 justify-start gap-4"
+                  disabled={!brandId || connectOAuthMutation.isPending}
+                  onClick={() => brandId && connectOAuthMutation.mutate({ brandId, platform: p.platform })}
+                >
+                  {p.icon}
+                  <div className="text-left">
+                    <p className="font-medium">{p.label}</p>
+                    <p className="text-xs text-muted-foreground">{p.sub}</p>
+                  </div>
+                  {connectOAuthMutation.isPending && <Loader2 className="h-4 w-4 animate-spin ml-auto" />}
+                </Button>
+              ))}
             </div>
 
             <p className="text-xs text-center text-muted-foreground">
-              Social account connections coming soon. Configure platform credentials in Settings first.
+              Make sure platform credentials are configured in Settings before connecting.
+              You can also connect accounts later from the Accounts page.
             </p>
 
             <Separator />

@@ -116,7 +116,7 @@ export function OrganizationSettings({ profile }: OrganizationSettingsProps) {
                 {(org?.plan || "free").toUpperCase()}
               </Badge>
               <span className="text-xs text-muted-foreground">
-                Plan management coming soon
+                Contact support to change your plan
               </span>
             </div>
           </div>

@@ -319,7 +319,69 @@ export const publishRouter = router({
 
       if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
-      // TODO: Update BullMQ job delay when BullMQ job ID tracking is added
+      // Update BullMQ jobs: remove old queued jobs and re-add with new delay
+      try {
+        const { getPublishQueue } = await import("@/server/queue/queues");
+        const publishQueue = getPublishQueue();
+
+        // Get post with group data for rebuilding platformMeta
+        const { data: postData } = await db
+          .from("content_posts")
+          .select("id, group_id, caption_overrides, media_groups:group_id(id, caption, tags, title, description)")
+          .eq("id", input.postId)
+          .single();
+
+        const group = (postData as any)?.media_groups;
+
+        // Get all queued publish_jobs for this post
+        const { data: pendingJobs } = await db
+          .from("publish_jobs")
+          .select("id, asset_id, social_account_id, action, resize_option, post_id")
+          .eq("post_id", input.postId)
+          .eq("status", "queued");
+
+        const delay = Math.max(0, new Date(input.newScheduledAt).getTime() - Date.now());
+
+        for (const pj of pendingJobs || []) {
+          // Try to remove the old job
+          try {
+            const existingJob = await publishQueue.getJob(`publish-${pj.id}`);
+            if (existingJob) await existingJob.remove();
+          } catch {
+            // Job may not exist in queue yet
+          }
+
+          // Rebuild platformMeta from group data
+          const platformMeta = group
+            ? getPlatformMetadata(
+                pj.action,
+                group.caption || "",
+                group.tags || [],
+                group.title,
+                group.description,
+                postData?.caption_overrides
+              )
+            : {};
+
+          await publishQueue.add(`publish-${pj.id}`, {
+            publishJobId: pj.id,
+            postId: pj.post_id,
+            assetId: pj.asset_id,
+            socialAccountId: pj.social_account_id,
+            action: pj.action,
+            resizeOption: pj.resize_option,
+            groupId: postData?.group_id || "",
+            platformMeta,
+          }, {
+            jobId: `publish-${pj.id}`,
+            delay,
+          });
+        }
+      } catch (e: any) {
+        console.error("[reschedule] Failed to update BullMQ jobs:", e.message);
+        // Non-fatal: DB is updated, queue update is best-effort
+      }
+
       return { success: true };
     }),
 });

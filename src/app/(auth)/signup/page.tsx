@@ -171,7 +171,7 @@ function SignupForm() {
               />
             </div>
 
-            <Button type="submit" className="w-full" disabled={loading || inviteChecking || (isInvited && inviteValid === false)}>
+            <Button type="submit" className="w-full" disabled={loading || inviteChecking || (isInvited && !inviteValid)}>
               {inviteChecking
                 ? "Validating invitation..."
                 : loading

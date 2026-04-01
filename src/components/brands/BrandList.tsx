@@ -4,35 +4,98 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/common/StatusBadge";
-import { Building2, Plus, Link2, HardDrive, Trash2, CheckCircle2 } from "lucide-react";
+import { Building2, Plus, Link2, HardDrive, Trash2, CheckCircle2, Users } from "lucide-react";
 import type { Brand, UserProfile } from "@/lib/types";
 import { canManageBrands } from "@/lib/types";
 import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
 
+const PLATFORM_LABELS: Record<string, string> = {
+  instagram: "Instagram",
+  youtube: "YouTube",
+  linkedin: "LinkedIn",
+  facebook: "Facebook",
+  tiktok: "TikTok",
+  twitter: "Twitter/X",
+  snapchat: "Snapchat",
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  brand_owner: "Owner",
+  brand_editor: "Editor",
+  brand_viewer: "Viewer",
+  agency_editor: "Agency Editor",
+};
+
 function BrandStats({ brandId }: { brandId: string }) {
   const { data: accounts = [] } = trpc.socialAccounts.list.useQuery({ brandId });
   const { data: driveStatus } = trpc.drive.status.useQuery({ brandId });
+  const { data: team } = trpc.brands.getTeamCount.useQuery({ brandId });
+
+  // Group accounts by platform
+  const platformCounts: Record<string, number> = {};
+  for (const acc of accounts as any[]) {
+    platformCounts[acc.platform] = (platformCounts[acc.platform] || 0) + 1;
+  }
+  const platformEntries = Object.entries(platformCounts);
 
   return (
-    <div className="flex items-center gap-4 text-sm text-muted-foreground">
-      <div className="flex items-center gap-1">
-        <Link2 className="h-3.5 w-3.5" />
-        <span>{accounts.length} account{accounts.length !== 1 ? "s" : ""}</span>
+    <div className="space-y-2.5">
+      {/* Accounts row */}
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+        <Link2 className="h-3.5 w-3.5 flex-shrink-0" />
+        {accounts.length === 0 ? (
+          <span>No accounts</span>
+        ) : (
+          <span>
+            {platformEntries.map(([platform, count], i) => (
+              <span key={platform}>
+                {PLATFORM_LABELS[platform] || platform} {count}
+                {i < platformEntries.length - 1 ? ", " : ""}
+              </span>
+            ))}
+          </span>
+        )}
       </div>
-      <div className="flex items-center gap-1">
+
+      {/* Drive row */}
+      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         {driveStatus?.connected && driveStatus?.isActive ? (
           <>
-            <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+            <CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
             <span className="text-green-600">Drive connected</span>
           </>
         ) : (
           <>
-            <HardDrive className="h-3.5 w-3.5" />
+            <HardDrive className="h-3.5 w-3.5 flex-shrink-0" />
             <span>Drive not connected</span>
           </>
         )}
       </div>
+
+      {/* Team row */}
+      {team && (
+        <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Users className="h-3.5 w-3.5 flex-shrink-0" />
+          {team.total === 0 ? (
+            <span>No team members</span>
+          ) : (
+            <span>
+              {team.total} member{team.total !== 1 ? "s" : ""}
+              {Object.keys(team.byRole).length > 0 && (
+                <span className="text-xs">
+                  {" "}({Object.entries(team.byRole).map(([role, count], i) => (
+                    <span key={role}>
+                      {count} {ROLE_LABELS[role] || role}
+                      {i < Object.entries(team.byRole).length - 1 ? ", " : ""}
+                    </span>
+                  ))})
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

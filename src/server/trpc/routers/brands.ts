@@ -99,6 +99,44 @@ export const brandsRouter = router({
       return data;
     }),
 
+  getTeamCount: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      // Brand-level users: directly assigned to this brand
+      const { data: brandUsers } = await db
+        .from("users")
+        .select("role")
+        .eq("org_id", profile.org_id)
+        .eq("brand_id", input.brandId)
+        .in("role", ["brand_owner", "brand_editor", "brand_viewer"]);
+
+      // Agency editors with this brand in assigned_brands
+      const { data: agencyEditors } = await db
+        .from("users")
+        .select("role, assigned_brands")
+        .eq("org_id", profile.org_id)
+        .eq("role", "agency_editor");
+
+      const assignedEditors = (agencyEditors || []).filter(
+        (u: any) => (u.assigned_brands || []).includes(input.brandId)
+      );
+
+      const byRole: Record<string, number> = {};
+      for (const u of brandUsers || []) {
+        byRole[u.role] = (byRole[u.role] || 0) + 1;
+      }
+      for (const _u of assignedEditors) {
+        byRole["agency_editor"] = (byRole["agency_editor"] || 0) + 1;
+      }
+
+      return {
+        total: (brandUsers?.length || 0) + assignedEditors.length,
+        byRole,
+      };
+    }),
+
   delete: superAdminProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
