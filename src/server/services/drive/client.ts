@@ -160,23 +160,48 @@ export async function connectDrive(
     ? new Date(tokens.expiry_date).toISOString()
     : null;
 
-  await db
+  // Build upsert payload — only overwrite refresh_token if Google returned a new one
+  // (Google may not return refresh_token on re-authorization in some edge cases)
+  const upsertData: Record<string, unknown> = {
+    brand_id: brandId,
+    google_account_email: email,
+    access_token_encrypted: encrypt(tokens.access_token!),
+    token_expires_at: expiresAt,
+    root_folder_id: folderIds.root,
+    folder_ids: folderIds,
+    is_active: true,
+  };
+
+  if (tokens.refresh_token) {
+    upsertData.refresh_token_encrypted = encrypt(tokens.refresh_token);
+  }
+
+  // Check if record exists — if so, update without clobbering refresh_token
+  const { data: existing } = await db
     .from("drive_connections")
-    .upsert(
-      {
-        brand_id: brandId,
-        google_account_email: email,
-        access_token_encrypted: encrypt(tokens.access_token!),
-        refresh_token_encrypted: tokens.refresh_token
-          ? encrypt(tokens.refresh_token)
-          : null,
-        token_expires_at: expiresAt,
-        root_folder_id: folderIds.root,
-        folder_ids: folderIds,
-        is_active: true,
-      },
-      { onConflict: "brand_id" }
-    );
+    .select("id, refresh_token_encrypted")
+    .eq("brand_id", brandId)
+    .single();
+
+  if (existing) {
+    // Keep existing refresh token if Google didn't return a new one
+    if (!tokens.refresh_token && existing.refresh_token_encrypted) {
+      // Don't overwrite — keep existing refresh token
+    } else if (tokens.refresh_token) {
+      upsertData.refresh_token_encrypted = encrypt(tokens.refresh_token);
+    }
+    await db
+      .from("drive_connections")
+      .update(upsertData)
+      .eq("brand_id", brandId);
+  } else {
+    upsertData.refresh_token_encrypted = tokens.refresh_token
+      ? encrypt(tokens.refresh_token)
+      : null;
+    await db
+      .from("drive_connections")
+      .insert(upsertData);
+  }
 
   return { success: true, email };
 }
@@ -496,11 +521,18 @@ export async function refreshTokenIfNeeded(
 
     return true;
   } catch (e: any) {
-    // Mark connection as inactive if refresh fails
-    await db
-      .from("drive_connections")
-      .update({ is_active: false })
-      .eq("brand_id", brandId);
+    // Only mark as inactive for permanent failures (invalid_grant = token revoked/expired permanently)
+    // Transient errors (network, timeout) should not kill the connection
+    const isPermFailure = e.message?.includes("invalid_grant") || e.response?.status === 401;
+    if (isPermFailure) {
+      console.warn(`[drive] Token permanently invalid for brand ${brandId}, marking inactive`);
+      await db
+        .from("drive_connections")
+        .update({ is_active: false })
+        .eq("brand_id", brandId);
+    } else {
+      console.warn(`[drive] Transient refresh failure for brand ${brandId}: ${e.message}`);
+    }
 
     return false;
   }

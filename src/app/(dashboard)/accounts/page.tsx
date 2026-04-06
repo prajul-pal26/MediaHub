@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,15 +16,55 @@ import {
   ChevronDown, ChevronRight, Plus, Trash2,
 } from "lucide-react";
 import { canManageBrands } from "@/lib/types";
+import { ChannelPickerDialog } from "@/components/accounts/ChannelPickerDialog";
 
 export default function AccountsPage() {
   const { profile, loading: profileLoading } = useUser();
   const { activeBrandId } = useBrand();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [manualPlatform, setManualPlatform] = useState<string>("instagram");
   const [manualToken, setManualToken] = useState("");
   const [manualUserId, setManualUserId] = useState("");
   const [manualUsername, setManualUsername] = useState("");
+
+  // Channel picker state
+  const [pendingChannelsId, setPendingChannelsId] = useState<string | null>(null);
+  const [pendingPlatform, setPendingPlatform] = useState<string>("");
+
+  // Handle OAuth redirect query params
+  useEffect(() => {
+    const pendingId = searchParams.get("pending_channels");
+    const platform = searchParams.get("platform");
+    if (pendingId && platform) {
+      setPendingChannelsId(pendingId);
+      setPendingPlatform(platform);
+    }
+
+    // Drive connection feedback
+    const driveConnected = searchParams.get("drive_connected");
+    const driveError = searchParams.get("drive_error");
+    const connected = searchParams.get("connected");
+    const updated = searchParams.get("updated");
+
+    if (driveConnected === "true") {
+      toast.success("Google Drive connected successfully");
+    }
+    if (driveError) {
+      toast.error(`Drive connection failed: ${decodeURIComponent(driveError)}`);
+    }
+    // Social account connection feedback
+    if (connected) {
+      const label = connected.charAt(0).toUpperCase() + connected.slice(1);
+      toast.success(updated === "true" ? `${label} account updated` : `${label} connected`);
+    }
+
+    // Clean up URL
+    if (pendingId || driveConnected || driveError || connected) {
+      router.replace("/accounts", { scroll: false });
+    }
+  }, [searchParams, router]);
 
   const { data: driveStatus, refetch: refetchDrive } = trpc.drive.status.useQuery(
     { brandId: activeBrandId! },
@@ -314,6 +355,20 @@ export default function AccountsPage() {
             )}
           </CardContent>
         </Card>
+      )}
+
+      {/* Channel Picker Dialog — shown when OAuth found multiple pages/channels */}
+      {pendingChannelsId && (
+        <ChannelPickerDialog
+          pendingId={pendingChannelsId}
+          platform={pendingPlatform}
+          open={!!pendingChannelsId}
+          onClose={() => setPendingChannelsId(null)}
+          onConnected={() => {
+            setPendingChannelsId(null);
+            refetchAccounts();
+          }}
+        />
       )}
     </div>
   );

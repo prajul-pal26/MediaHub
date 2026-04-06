@@ -3,6 +3,8 @@ import { getDb } from "@/lib/supabase/db";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { verifyState } from "@/server/trpc/routers/social-accounts";
 import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
+import { getRedis } from "@/lib/redis";
+import { randomUUID } from "crypto";
 
 export async function GET(
   request: NextRequest,
@@ -94,13 +96,45 @@ export async function GET(
         expiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
       }
 
-      // Get channel info
+      // Get ALL channels (includes brand accounts managed by this Google account)
       const channelRes = await fetch(
-        "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+        "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true&maxResults=50",
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       const channelData = await channelRes.json();
-      const channel = channelData.items?.[0];
+      const allChannels = channelData.items || [];
+
+      if (allChannels.length > 1) {
+        // Multiple channels — store in Redis and let user pick
+        const pendingId = randomUUID();
+        const redis = getRedis();
+        await redis.set(
+          `pending_channels:${pendingId}`,
+          JSON.stringify({
+            platform,
+            brandId: state.brandId,
+            orgId: state.orgId,
+            userAccessToken: accessToken,
+            refreshToken,
+            expiresAt,
+            channels: allChannels.map((ch: any) => ({
+              id: ch.id,
+              name: ch.snippet?.title || ch.id,
+              thumbnail: ch.snippet?.thumbnails?.default?.url || null,
+            })),
+          }),
+          "EX",
+          600
+        );
+
+        console.log(`[social-callback] YouTube: ${allChannels.length} channels found, pending selection ${pendingId}`);
+        return NextResponse.redirect(
+          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
+        );
+      }
+
+      // Single channel — auto-connect as before
+      const channel = allChannels[0];
       platformUserId = channel?.id || "";
       platformUsername = channel?.snippet?.title || "";
       platformMetadata = { channel_id: channel?.id };
@@ -124,28 +158,79 @@ export async function GET(
 
       accessToken = tokenData.access_token;
 
-      // Get pages
+      // Get ALL pages
       const pagesRes = await fetch(
         `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
       );
       const pagesData = await pagesRes.json();
-      const page = pagesData.data?.[0];
+      const allPages = pagesData.data || [];
 
-      if (page) {
-        const pageToken = page.access_token;
-        const igRes = await fetch(
-          `https://graph.facebook.com/v19.0/${page.id}?fields=instagram_business_account&access_token=${pageToken}`
-        );
-        const igData = await igRes.json();
-        platformUserId = igData.instagram_business_account?.id || page.id;
-        platformUsername = page.name || "";
-        platformMetadata = { page_id: page.id, page_access_token_encrypted: encrypt(pageToken) };
-        accessToken = pageToken;
-      } else {
+      if (allPages.length === 0) {
         return NextResponse.redirect(
           new URL("/accounts?error=No+Facebook+Page+found.+Instagram+requires+a+Business/Creator+account+connected+to+a+Facebook+Page.", request.url)
         );
       }
+
+      // Resolve IG business accounts for all pages
+      const channels: Array<{
+        pageId: string;
+        pageName: string;
+        pageToken: string;
+        igAccountId: string;
+        igUsername: string;
+      }> = [];
+
+      for (const page of allPages) {
+        const pageToken = page.access_token;
+        const igRes = await fetch(
+          `https://graph.facebook.com/v19.0/${page.id}?fields=instagram_business_account{id,username}&access_token=${pageToken}`
+        );
+        const igData = await igRes.json();
+        channels.push({
+          pageId: page.id,
+          pageName: page.name || page.id,
+          pageToken,
+          igAccountId: igData.instagram_business_account?.id || page.id,
+          igUsername: igData.instagram_business_account?.username || page.name || "",
+        });
+      }
+
+      if (channels.length > 1) {
+        // Multiple pages — store in Redis and let user pick
+        const pendingId = randomUUID();
+        const redis = getRedis();
+        await redis.set(
+          `pending_channels:${pendingId}`,
+          JSON.stringify({
+            platform,
+            brandId: state.brandId,
+            orgId: state.orgId,
+            userAccessToken: accessToken,
+            refreshToken: null,
+            expiresAt: null,
+            channels: channels.map((ch) => ({
+              id: ch.igAccountId,
+              name: ch.igUsername || ch.pageName,
+              pageId: ch.pageId,
+              pageToken: ch.pageToken,
+            })),
+          }),
+          "EX",
+          600 // 10 minutes TTL
+        );
+
+        console.log(`[social-callback] Instagram: ${channels.length} pages found, pending selection ${pendingId}`);
+        return NextResponse.redirect(
+          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
+        );
+      }
+
+      // Single page — auto-connect as before
+      const ch = channels[0];
+      platformUserId = ch.igAccountId;
+      platformUsername = ch.igUsername || ch.pageName;
+      platformMetadata = { page_id: ch.pageId, page_access_token_encrypted: encrypt(ch.pageToken) };
+      accessToken = ch.pageToken;
 
       console.log("[social-callback] Instagram connected:", platformUsername);
     }
@@ -204,24 +289,56 @@ export async function GET(
 
       accessToken = tokenData.access_token;
 
-      // Get pages
+      // Get ALL pages
       const pagesRes = await fetch(
         `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
       );
       const pagesData = await pagesRes.json();
-      const page = pagesData.data?.[0];
+      const allPages = pagesData.data || [];
 
-      if (page) {
-        const pageToken = page.access_token;
-        platformUserId = page.id;
-        platformUsername = page.name || "";
-        platformMetadata = { page_id: page.id, page_access_token_encrypted: encrypt(pageToken) };
-        accessToken = pageToken;
-      } else {
+      if (allPages.length === 0) {
         return NextResponse.redirect(
           new URL("/accounts?error=No+Facebook+Page+found.+Please+ensure+your+account+has+at+least+one+Page.", request.url)
         );
       }
+
+      if (allPages.length > 1) {
+        // Multiple pages — store in Redis and let user pick
+        const pendingId = randomUUID();
+        const redis = getRedis();
+        await redis.set(
+          `pending_channels:${pendingId}`,
+          JSON.stringify({
+            platform,
+            brandId: state.brandId,
+            orgId: state.orgId,
+            userAccessToken: accessToken,
+            refreshToken: null,
+            expiresAt: null,
+            channels: allPages.map((page: any) => ({
+              id: page.id,
+              name: page.name || page.id,
+              pageId: page.id,
+              pageToken: page.access_token,
+            })),
+          }),
+          "EX",
+          600
+        );
+
+        console.log(`[social-callback] Facebook: ${allPages.length} pages found, pending selection ${pendingId}`);
+        return NextResponse.redirect(
+          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
+        );
+      }
+
+      // Single page — auto-connect as before
+      const page = allPages[0];
+      const pageToken = page.access_token;
+      platformUserId = page.id;
+      platformUsername = page.name || "";
+      platformMetadata = { page_id: page.id, page_access_token_encrypted: encrypt(pageToken) };
+      accessToken = pageToken;
 
       console.log("[social-callback] Facebook connected:", platformUsername);
     }

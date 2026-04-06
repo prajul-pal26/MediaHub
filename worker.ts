@@ -1707,26 +1707,41 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
 
   const youtube = google.youtube({ version: "v3", auth: oauth2 });
 
+  // Step 1: Get the channel's "uploads" playlist ID
+  // This is much more reliable than search.list, which often returns only ~25 results
+  // and costs 100 quota units per call vs 1 for playlistItems.list
+  const channelRes = await youtube.channels.list({
+    id: [account.platform_user_id],
+    part: ["contentDetails"],
+  });
+
+  const uploadsPlaylistId = channelRes.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+  if (!uploadsPlaylistId) {
+    console.error("[historical] YouTube: Could not find uploads playlist for channel", account.platform_user_id);
+    return 0;
+  }
+
+  console.log(`[historical] YouTube: Using uploads playlist ${uploadsPlaylistId}`);
+
   let pageToken: string | undefined;
   let totalImported = 0;
 
   do {
-    const searchRes = await youtube.search.list({
-      channelId: account.platform_user_id,
-      type: ["video"],
-      part: ["snippet"],
+    // Step 2: List videos from the uploads playlist (1 quota unit per call)
+    const playlistRes = await youtube.playlistItems.list({
+      playlistId: uploadsPlaylistId,
+      part: ["snippet", "contentDetails"],
       maxResults: 50,
       pageToken,
-      order: "date",
     });
 
-    const videoIds = (searchRes.data.items || [])
-      .map((item) => item.id?.videoId)
+    const videoIds = (playlistRes.data.items || [])
+      .map((item) => item.contentDetails?.videoId)
       .filter((id): id is string => Boolean(id));
 
     if (videoIds.length === 0) break;
 
-    // Get statistics for all videos in batch
+    // Step 3: Batch-fetch statistics and duration for these videos
     const statsRes = await youtube.videos.list({
       id: videoIds,
       part: ["statistics", "snippet", "contentDetails"],
@@ -1791,7 +1806,7 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
       }
     }
 
-    pageToken = searchRes.data.nextPageToken || undefined;
+    pageToken = playlistRes.data.nextPageToken || undefined;
 
     // Rate limiting
     if (totalImported % 50 === 0 && totalImported > 0) {
@@ -1885,6 +1900,146 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
   }
 
   console.log(`[historical] Facebook import complete: ${totalImported} posts`);
+  return totalImported;
+}
+
+async function importLinkedInHistory(account: any, brandId: string, _orgId: string): Promise<number> {
+  const accessToken = decrypt(account.access_token_encrypted);
+  const personUrn = account.platform_metadata?.person_urn;
+  if (!personUrn) throw new Error("No LinkedIn person URN found");
+
+  const authorUrn = encodeURIComponent(personUrn);
+
+  console.log(`[historical] Importing LinkedIn history for ${account.platform_username}...`);
+
+  let start = 0;
+  const count = 50;
+  let totalImported = 0;
+  let hasMore = true;
+
+  while (hasMore && totalImported < 500) {
+    // LinkedIn Posts API — fetch user's own posts
+    const res = await fetchWithTimeout(
+      `https://api.linkedin.com/rest/posts?author=${authorUrn}&q=author&count=${count}&start=${start}&sortBy=LAST_MODIFIED`,
+      {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "LinkedIn-Version": "202401",
+          "X-Restli-Protocol-Version": "2.0.0",
+        },
+      },
+      30000
+    );
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error(`[historical] LinkedIn API error (${res.status}):`, errText);
+      // If 403, the scope r_member_social may not be granted — user needs to reconnect
+      if (res.status === 403) {
+        console.error("[historical] LinkedIn: r_member_social scope likely not granted. User must reconnect.");
+      }
+      break;
+    }
+
+    const data = await res.json();
+    const posts = data.elements || [];
+
+    if (posts.length === 0) break;
+
+    for (const post of posts) {
+      try {
+        const postId = post.id;
+        const publishedAt = post.createdAt
+          ? new Date(post.createdAt).toISOString()
+          : post.lastModifiedAt
+            ? new Date(post.lastModifiedAt).toISOString()
+            : new Date().toISOString();
+
+        // Determine action based on content type
+        const hasArticle = post.content?.article;
+        const action = hasArticle ? "li_article" : "li_post";
+
+        // Create content post
+        const { data: contentPost } = await db().from("content_posts").insert({
+          group_id: null,
+          brand_id: brandId,
+          status: "published",
+          published_at: publishedAt,
+          source: "api",
+        }).select().single();
+
+        if (!contentPost) continue;
+
+        // Create publish job
+        await db().from("publish_jobs").insert({
+          post_id: contentPost.id,
+          asset_id: null,
+          social_account_id: account.id,
+          action,
+          status: "completed",
+          platform_post_id: postId,
+          completed_at: publishedAt,
+        });
+
+        // Fetch social actions (likes, comments, shares) for this post
+        let metrics: Record<string, number> = {};
+        try {
+          const statsRes = await fetchWithTimeout(
+            `https://api.linkedin.com/rest/socialActions/${encodeURIComponent(postId)}?fields=likes,comments,shares`,
+            {
+              headers: {
+                "Authorization": `Bearer ${accessToken}`,
+                "LinkedIn-Version": "202401",
+                "X-Restli-Protocol-Version": "2.0.0",
+              },
+            },
+            10000
+          );
+          if (statsRes.ok) {
+            const statsData = await statsRes.json();
+            metrics = {
+              likes: statsData.likesSummary?.totalLikes || 0,
+              comments: statsData.commentsSummary?.totalFirstLevelComments || 0,
+              shares: statsData.sharesSummary?.totalShares || 0,
+            };
+          }
+        } catch {
+          // Metrics may not be available
+        }
+
+        const liAnalytics = {
+          views: 0,
+          likes: metrics.likes || 0,
+          comments: metrics.comments || 0,
+          shares: metrics.shares || 0,
+        };
+
+        await db().from("post_analytics").insert({
+          post_id: contentPost.id,
+          social_account_id: account.id,
+          ...liAnalytics,
+          platform_specific: { post_urn: postId, content_type: action },
+          fetched_at: new Date().toISOString(),
+        });
+
+        await appendAnalyticsHistory(contentPost.id, account.id, liAnalytics);
+
+        totalImported++;
+
+        // Rate limiting — LinkedIn is strict (~100 calls/day for some apps)
+        if (totalImported % 10 === 0) {
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      } catch (e: any) {
+        console.error(`[historical] Error importing LinkedIn post ${post.id}:`, e.message);
+      }
+    }
+
+    start += posts.length;
+    hasMore = posts.length === count;
+  }
+
+  console.log(`[historical] LinkedIn import complete: ${totalImported} posts`);
   return totalImported;
 }
 
@@ -2068,9 +2223,7 @@ const historicalWorker = new Worker(
     } else if (platform === "youtube") {
       imported = await importYouTubeHistory(account, brandId, orgId);
     } else if (platform === "linkedin") {
-      // LinkedIn historical import is limited — API doesn't support fetching past shares easily
-      console.log("[historical] LinkedIn historical import not available (API limitation)");
-      imported = 0;
+      imported = await importLinkedInHistory(account, brandId, orgId);
     } else if (platform === "facebook") {
       imported = await importFacebookHistory(account, brandId, orgId);
     } else if (platform === "tiktok") {

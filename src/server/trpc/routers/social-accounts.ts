@@ -3,6 +3,8 @@ import { router, protectedProcedure, adminProcedure, assertBrandAccess } from ".
 import { TRPCError } from "@trpc/server";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { createHmac, randomBytes, createHash } from "crypto";
+import { getRedis } from "@/lib/redis";
+import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
 
 const platformSchema = z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]);
 
@@ -94,7 +96,7 @@ export const socialAccountsRouter = router({
           url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly")}&response_type=code&access_type=offline&prompt=consent&state=${encodeURIComponent(state)}`;
           break;
         case "linkedin":
-          url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social")}&state=${encodeURIComponent(state)}`;
+          url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social r_member_social")}&state=${encodeURIComponent(state)}`;
           break;
         case "facebook":
           url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=pages_manage_posts,pages_read_engagement,pages_manage_engagement,pages_show_list&response_type=code&state=${encodeURIComponent(state)}`;
@@ -175,6 +177,28 @@ export const socialAccountsRouter = router({
       } catch (e: any) {
         if (e.code === "BAD_REQUEST") throw e;
         throw new TRPCError({ code: "BAD_REQUEST", message: `Token validation failed: ${e.message}` });
+      }
+
+      // Check for existing account — upsert instead of creating duplicate
+      const { data: existing } = await db.from("social_accounts")
+        .select("id")
+        .eq("brand_id", input.brandId)
+        .eq("platform", input.platform)
+        .eq("platform_user_id", input.platformUserId)
+        .single();
+
+      if (existing) {
+        const { data: updated, error } = await db.from("social_accounts")
+          .update({
+            access_token_encrypted: encrypt(input.accessToken),
+            platform_username: input.platformUsername || null,
+            is_active: true,
+          })
+          .eq("id", existing.id)
+          .select()
+          .single();
+        if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
+        return updated;
       }
 
       const { data, error } = await db
@@ -437,5 +461,154 @@ export const socialAccountsRouter = router({
       } catch (e: any) {
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: e.message });
       }
+    }),
+
+  getPendingChannels: protectedProcedure
+    .input(z.object({ pendingId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const redis = getRedis();
+      const raw = await redis.get(`pending_channels:${input.pendingId}`);
+      if (!raw) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pending channel selection expired or not found" });
+      }
+
+      const data = JSON.parse(raw);
+
+      // Verify the user has access to this brand
+      assertBrandAccess(ctx.profile, data.brandId);
+
+      // Return channels without sensitive token data
+      return {
+        platform: data.platform as string,
+        brandId: data.brandId as string,
+        channels: (data.channels as Array<{ id: string; name: string; thumbnail?: string }>).map((ch) => ({
+          id: ch.id,
+          name: ch.name,
+          thumbnail: (ch as any).thumbnail || null,
+        })),
+      };
+    }),
+
+  connectSelectedChannels: protectedProcedure
+    .input(z.object({
+      pendingId: z.string().uuid(),
+      selectedChannelIds: z.array(z.string()).min(1),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+
+      if (profile.role !== "brand_owner") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the brand owner can connect social accounts" });
+      }
+
+      const redis = getRedis();
+      const raw = await redis.get(`pending_channels:${input.pendingId}`);
+      if (!raw) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pending channel selection expired. Please re-authenticate." });
+      }
+
+      const data = JSON.parse(raw);
+      assertBrandAccess(profile, data.brandId);
+
+      if (profile.brand_id !== data.brandId) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only connect accounts for your own brand" });
+      }
+
+      const platform = data.platform as string;
+      const allChannels = data.channels as Array<{
+        id: string;
+        name: string;
+        pageId?: string;
+        pageToken?: string;
+        thumbnail?: string;
+      }>;
+
+      const selected = allChannels.filter((ch) => input.selectedChannelIds.includes(ch.id));
+      if (selected.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "None of the selected channels were found" });
+      }
+
+      const connected: string[] = [];
+
+      for (const ch of selected) {
+        const tokenToStore = ch.pageToken || data.userAccessToken;
+        const platformMetadata: Record<string, unknown> = {};
+        let platformUserId = ch.id;
+        let platformUsername = ch.name;
+
+        if (platform === "instagram" || platform === "facebook") {
+          platformMetadata.page_id = ch.pageId || ch.id;
+          platformMetadata.page_access_token_encrypted = encrypt(ch.pageToken || data.userAccessToken);
+        } else if (platform === "youtube") {
+          platformMetadata.channel_id = ch.id;
+        }
+
+        // Upsert: update if exists, insert if new
+        const { data: existing } = await db.from("social_accounts")
+          .select("id")
+          .eq("brand_id", data.brandId)
+          .eq("platform", platform)
+          .eq("platform_user_id", platformUserId)
+          .single();
+
+        if (existing) {
+          await db.from("social_accounts").update({
+            access_token_encrypted: encrypt(tokenToStore),
+            refresh_token_encrypted: data.refreshToken ? encrypt(data.refreshToken) : null,
+            token_expires_at: data.expiresAt || null,
+            platform_username: platformUsername,
+            platform_metadata: platformMetadata,
+            is_active: true,
+          }).eq("id", existing.id);
+
+          connected.push(existing.id);
+
+          // Queue jobs for reconnected account
+          try {
+            const queue = getHistoricalImportQueue();
+            await queue.add(`historical-${platform}-${data.brandId}`, {
+              accountId: existing.id, brandId: data.brandId, orgId: data.orgId, platform,
+            });
+          } catch {}
+        } else {
+          const { data: newAccount } = await db.from("social_accounts").insert({
+            brand_id: data.brandId,
+            platform,
+            platform_user_id: platformUserId,
+            platform_username: platformUsername,
+            access_token_encrypted: encrypt(tokenToStore),
+            refresh_token_encrypted: data.refreshToken ? encrypt(data.refreshToken) : null,
+            token_expires_at: data.expiresAt || null,
+            connection_method: "oauth",
+            platform_metadata: platformMetadata,
+            is_active: true,
+          }).select("id").single();
+
+          if (newAccount) {
+            connected.push(newAccount.id);
+
+            // Queue jobs for new account
+            try {
+              const queue = getHistoricalImportQueue();
+              await queue.add(`historical-${platform}-${data.brandId}`, {
+                accountId: newAccount.id, brandId: data.brandId, orgId: data.orgId, platform,
+              });
+            } catch {}
+          }
+        }
+
+        // Queue comment sync
+        try {
+          const commentSyncQueue = getCommentSyncQueue();
+          await commentSyncQueue.add(`comment-sync-${platform}-${data.brandId}`, {
+            brandId: data.brandId,
+          });
+        } catch {}
+      }
+
+      // Clean up Redis
+      await redis.del(`pending_channels:${input.pendingId}`);
+
+      return { connected: connected.length, platform };
     }),
 });
