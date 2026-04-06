@@ -28,6 +28,21 @@ export function verifyState(encoded: string): { brandId: string; orgId: string; 
 }
 
 export const socialAccountsRouter = router({
+  // Returns which social platforms have credentials configured (visible to all authenticated users)
+  configuredPlatforms: protectedProcedure
+    .query(async ({ ctx }) => {
+      const { db, profile } = ctx;
+      const socialPlatforms = ["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"];
+
+      const { data } = await db
+        .from("platform_credentials")
+        .select("platform")
+        .eq("org_id", profile.org_id)
+        .in("platform", socialPlatforms);
+
+      return (data || []).map((row: any) => row.platform as string);
+    }),
+
   list: protectedProcedure
     .input(z.object({ brandId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {

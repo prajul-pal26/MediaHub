@@ -76,6 +76,8 @@ export default function AccountsPage() {
     { enabled: !!activeBrandId }
   );
 
+  const { data: configuredPlatforms = [] } = trpc.socialAccounts.configuredPlatforms.useQuery();
+
   const connectDriveMutation = trpc.drive.connect.useMutation({
     onSuccess: (data) => { window.location.href = data.url; },
     onError: (error) => toast.error(error.message),
@@ -179,13 +181,13 @@ export default function AccountsPage() {
         </CardContent>
       </Card>
 
-      {/* Social Accounts — Platform Tiles */}
+      {/* Social Accounts — Platform Tiles (only shows platforms configured by super admin) */}
       <div>
         <h2 className="text-lg font-semibold mb-4">Social Accounts</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {([
             {
-              key: "instagram" as const,
+              key: "instagram",
               label: "Instagram",
               hint: "Requires Business or Creator account connected to a Facebook Page",
               logo: (
@@ -196,7 +198,7 @@ export default function AccountsPage() {
               ),
             },
             {
-              key: "youtube" as const,
+              key: "youtube",
               label: "YouTube",
               hint: "Any YouTube channel works",
               logo: (
@@ -206,7 +208,7 @@ export default function AccountsPage() {
               ),
             },
             {
-              key: "linkedin" as const,
+              key: "linkedin",
               label: "LinkedIn",
               hint: "Personal profile or company page (admin access needed)",
               note: "To add a different LinkedIn account, disconnect the current one first and log out of LinkedIn in your browser.",
@@ -216,7 +218,45 @@ export default function AccountsPage() {
                 </svg>
               ),
             },
-          ]).map((p) => {
+            {
+              key: "facebook",
+              label: "Facebook",
+              hint: "Requires a Facebook Page (Business or Creator)",
+              logo: (
+                <svg className="h-10 w-10" viewBox="0 0 24 24" fill="#1877F2">
+                  <path d="M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z" />
+                </svg>
+              ),
+            },
+            {
+              key: "tiktok",
+              label: "TikTok",
+              hint: "Requires TikTok for Developers account",
+              logo: (
+                <svg className="h-10 w-10" viewBox="0 0 24 24" fill="#000000">
+                  <path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z" />
+                </svg>
+              ),
+            },
+            {
+              key: "twitter",
+              label: "X (Twitter)",
+              hint: "Post tweets with images and videos",
+              logo: (
+                <svg className="h-10 w-10" viewBox="0 0 24 24" fill="#000000">
+                  <path d="M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z" />
+                </svg>
+              ),
+            },
+            {
+              key: "snapchat",
+              label: "Snapchat",
+              hint: "Share content to Snapchat Stories",
+              logo: (
+                <svg className="h-10 w-10" viewBox="0 0 24 24"><path d="M12.206.793c.99 0 4.347.276 5.93 3.821.529 1.193.403 3.219.299 4.847l-.003.06c-.012.18-.022.345-.03.51.075.045.203.09.401.09.3-.016.659-.12 1.033-.301.165-.088.344-.104.464-.104.182 0 .359.029.509.09.45.149.734.479.734.838.015.449-.39.839-1.213 1.168-.089.029-.209.075-.344.119-.45.135-1.139.36-1.333.81-.09.224-.061.524.12.868l.015.015c.06.136 1.526 3.475 4.791 4.014.255.044.435.27.42.509 0 .075-.015.149-.045.225-.24.569-1.273.988-3.146 1.271-.059.091-.12.375-.164.57-.029.179-.074.36-.134.553-.076.271-.27.405-.555.405h-.03c-.135 0-.313-.031-.538-.074-.36-.075-.765-.135-1.273-.135-.3 0-.599.015-.913.074-.6.104-1.123.464-1.723.884-.853.599-1.826 1.288-3.294 1.288-.06 0-.119-.015-.18-.015h-.149c-1.468 0-2.427-.675-3.279-1.288-.599-.42-1.107-.779-1.707-.884-.314-.045-.629-.074-.928-.074-.54 0-.958.089-1.272.149-.211.043-.391.074-.54.074-.374 0-.523-.224-.583-.42-.061-.192-.09-.389-.135-.567-.046-.181-.105-.494-.166-.57-1.918-.222-2.95-.642-3.189-1.226-.031-.063-.052-.15-.055-.225-.015-.243.165-.465.42-.509 3.264-.54 4.73-3.879 4.791-4.02l.016-.029c.18-.345.224-.645.119-.869-.195-.434-.884-.658-1.332-.809-.121-.029-.24-.074-.346-.119-1.107-.435-1.257-.93-1.197-1.273.09-.479.674-.793 1.168-.793.146 0 .27.029.383.074.42.194.789.3 1.104.3.234 0 .384-.06.465-.105l-.046-.569c-.098-1.626-.225-3.651.307-4.837C7.392 1.077 10.739.807 11.727.807l.419-.015h.06" fill="#FFFC00" stroke="#000000" strokeWidth="0.5"/></svg>
+              ),
+            },
+          ] as const).filter((p) => configuredPlatforms.includes(p.key)).map((p) => {
             const connected = socialAccounts.filter((a: any) => a.platform === p.key);
             const hasAccounts = connected.length > 0;
 
@@ -313,7 +353,7 @@ export default function AccountsPage() {
             {showAdvanced && activeBrandId && (
               <div className="mt-3 space-y-3 p-4 border rounded-lg bg-muted/30">
                 <div className="grid grid-cols-3 gap-2">
-                  {(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"] as const).map((p) => (
+                  {(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"] as const).filter((p) => configuredPlatforms.includes(p)).map((p) => (
                     <Button
                       key={p}
                       size="sm"
