@@ -1,0 +1,45 @@
+appId: com.deepvidya.mediahub
+productName: MediaHub
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  - "dist/**/*"
+  - "docker/**/*"
+  - "scripts/**/*"
+  - "assets/**/*"
+
+extraResources:
+  - from: "docker/"
+    to: "docker/"
+  - from: "scripts/"
+    to: "scripts/"
+
+mac:
+  category: public.app-category.business
+  icon: assets/icon.png
+  target:
+    - dmg
+    - zip
+
+win:
+  icon: assets/icon.png
+  target:
+    - nsis
+
+linux:
+  icon: assets/icon.png
+  target:
+    - AppImage
+    - deb
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+
+publish:
+  provider: github
+  owner: DeepVidyaAI
+  repo: MediaHub-App
