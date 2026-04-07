@@ -111,7 +111,7 @@ export const socialAccountsRouter = router({
           url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly")}&response_type=code&access_type=offline&prompt=consent&state=${encodeURIComponent(state)}`;
           break;
         case "linkedin":
-          url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social r_member_social")}&state=${encodeURIComponent(state)}`;
+          url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social")}&state=${encodeURIComponent(state)}`;
           break;
         case "facebook":
           url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=pages_manage_posts,pages_read_engagement,pages_manage_engagement,pages_show_list&response_type=code&state=${encodeURIComponent(state)}`;
