@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
@@ -16,6 +16,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // Clear any stale session on login page load (prevents "Invalid Refresh Token" errors)
+  useEffect(() => {
+    supabase.auth.signOut().catch(() => {});
+  }, []);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
