@@ -1,7 +1,23 @@
+# ============================================
+# MediaHub — Complete Local Development Stack
+# ============================================
+#
+# Start:       docker compose up --build
+# Stop:        docker compose down
+# Full reset:  docker compose down -v && docker compose up --build
+#
+# URLs:
+#   App:     http://localhost:3000
+#   Studio:  http://localhost:54323
+#   Email:   http://localhost:54324
+#
+# Login: admin@mediahub.local / admin123
+
 services:
-  # ─── Supabase PostgreSQL ───
+  # ─── Database ───
   db:
     image: supabase/postgres:15.6.1.143
+    container_name: mediahub-database
     restart: unless-stopped
     ports:
       - "54322:5432"
@@ -11,7 +27,7 @@ services:
       JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
       JWT_EXP: 3600
     volumes:
-      - supabase-db:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
       - ./supabase/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U supabase_admin -d supabase"]
@@ -19,28 +35,58 @@ services:
       timeout: 5s
       retries: 10
 
-  # ─── Supabase Studio (Database UI) ───
-  studio:
-    image: supabase/studio:20240422-5cf8f30
+  # ─── Auth ───
+  auth:
+    image: supabase/gotrue:v2.151.0
+    container_name: mediahub-auth
     restart: unless-stopped
-    ports:
-      - "54323:3000"
     environment:
-      STUDIO_PG_META_URL: http://meta:8080
-      SUPABASE_URL: http://kong:8000
-      SUPABASE_REST_URL: http://kong:8000/rest/v1/
-      SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
-      SUPABASE_SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: http://localhost:54321
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:postgres@db:5432/supabase?search_path=auth
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_URI_ALLOW_LIST: ""
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: admin@localhost
+      GOTRUE_SMTP_HOST: email
+      GOTRUE_SMTP_PORT: "2500"
+      GOTRUE_SMTP_SENDER_NAME: MediaHub
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
     depends_on:
-      - kong
+      db:
+        condition: service_healthy
 
-  # ─── Supabase Kong API Gateway ───
+  # ─── REST API ───
+  rest:
+    image: postgrest/postgrest:v12.0.1
+    container_name: mediahub-rest
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:postgres@db:5432/supabase
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ─── API Gateway ───
   kong:
     image: kong:2.8.1
+    container_name: mediahub-gateway
     restart: unless-stopped
     ports:
       - "54321:8000"
-      - "54325:8443"
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
@@ -54,52 +100,10 @@ services:
       - rest
       - auth
 
-  # ─── Supabase Auth (GoTrue) ───
-  auth:
-    image: supabase/gotrue:v2.151.0
-    restart: unless-stopped
-    environment:
-      GOTRUE_API_HOST: 0.0.0.0
-      GOTRUE_API_PORT: 9999
-      API_EXTERNAL_URL: http://localhost:54321
-      GOTRUE_DB_DRIVER: postgres
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:postgres@db:5432/supabase?search_path=auth
-      GOTRUE_SITE_URL: https://localhost:3443
-      GOTRUE_URI_ALLOW_LIST: ""
-      GOTRUE_DISABLE_SIGNUP: "false"
-      GOTRUE_JWT_ADMIN_ROLES: service_role
-      GOTRUE_JWT_AUD: authenticated
-      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
-      GOTRUE_JWT_EXP: 3600
-      GOTRUE_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
-      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
-      GOTRUE_MAILER_AUTOCONFIRM: "true"
-      GOTRUE_SMTP_ADMIN_EMAIL: admin@localhost
-      GOTRUE_SMTP_HOST: inbucket
-      GOTRUE_SMTP_PORT: "2500"
-      GOTRUE_SMTP_SENDER_NAME: MediaHub
-      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
-    depends_on:
-      db:
-        condition: service_healthy
-
-  # ─── Supabase REST (PostgREST) ───
-  rest:
-    image: postgrest/postgrest:v12.0.1
-    restart: unless-stopped
-    environment:
-      PGRST_DB_URI: postgres://authenticator:postgres@db:5432/supabase
-      PGRST_DB_SCHEMAS: public,storage
-      PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-    depends_on:
-      db:
-        condition: service_healthy
-
-  # ─── Supabase Realtime ───
+  # ─── Realtime ───
   realtime:
     image: supabase/realtime:v2.28.32
+    container_name: mediahub-realtime
     restart: unless-stopped
     environment:
       PORT: 4000
@@ -121,9 +125,26 @@ services:
       db:
         condition: service_healthy
 
-  # ─── Supabase Meta (for Studio) ───
+  # ─── Database Studio ───
+  studio:
+    image: supabase/studio:20240422-5cf8f30
+    container_name: mediahub-studio
+    restart: unless-stopped
+    ports:
+      - "54323:3000"
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_REST_URL: http://kong:8000/rest/v1/
+      SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      SUPABASE_SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+    depends_on:
+      - kong
+
+  # ─── Database Meta (for Studio) ───
   meta:
     image: supabase/postgres-meta:v0.80.0
+    container_name: mediahub-meta
     restart: unless-stopped
     environment:
       PG_META_PORT: 8080
@@ -136,9 +157,10 @@ services:
       db:
         condition: service_healthy
 
-  # ─── Redis (for BullMQ) ───
+  # ─── Redis ───
   redis:
     image: redis:7-alpine
+    container_name: mediahub-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -150,35 +172,53 @@ services:
       timeout: 3s
       retries: 5
 
-  # ─── Inbucket (Email testing) ───
-  inbucket:
+  # ─── Email (catches all emails locally for testing) ───
+  email:
     image: inbucket/inbucket:latest
+    container_name: mediahub-email
     restart: unless-stopped
     ports:
-      - "54324:9000"   # Web UI
-      - "2500:2500"    # SMTP
+      - "54324:9000"
+      - "2500:2500"
 
-  # ─── Next.js App (Frontend + tRPC API) ───
-  # NEXT_PUBLIC_ vars are embedded in client-side JS (browser runs on host).
-  # Browser needs 127.0.0.1:54321 but server-side needs kong:8000.
-  # Solution: NEXT_PUBLIC_SUPABASE_URL for browser, SUPABASE_INTERNAL_URL for server.
-  app:
+  # ─── Init (schema + migrations + admin — runs once) ───
+  init:
+    build:
+      context: .
+      dockerfile: Dockerfile.init
+    container_name: mediahub-init
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASS: postgres
+      DB_NAME: supabase
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@mediahub.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+    depends_on:
+      - kong
+      - auth
+      - redis
+
+  # ─── Frontend (Next.js + tRPC) ───
+  frontend:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: mediahub-frontend
     restart: unless-stopped
     ports:
       - "3000:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-      SUPABASE_INTERNAL_URL: http://kong:8000
       NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      SUPABASE_INTERNAL_URL: http://kong:8000
       SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2}
-      NEXT_PUBLIC_APP_URL: https://localhost:3443
       CRON_SECRET: dev-cron-secret
     volumes:
       - .:/app
@@ -186,66 +226,35 @@ services:
       - /app/.next
     command: npm run dev
     depends_on:
-      kong:
-        condition: service_started
+      init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
-  # ─── BullMQ Worker (publish, analytics, token refresh) ───
+  # ─── Worker (BullMQ — publishing, analytics, token refresh) ───
   worker:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: mediahub-worker
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       NEXT_PUBLIC_SUPABASE_URL: http://kong:8000
       NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
       SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2}
-      NEXT_PUBLIC_APP_URL: https://localhost:3443
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
     volumes:
       - .:/app
       - /app/node_modules
     command: npx tsx watch worker.ts
     depends_on:
-      kong:
-        condition: service_started
+      init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
-  # ─── SSL Proxy (HTTPS on port 3443 → HTTP app:3000) ───
-  ssl-proxy:
-    image: node:20-alpine
-    restart: unless-stopped
-    ports:
-      - "3443:3443"
-    volumes:
-      - ./localhost+1.pem:/certs/cert.pem:ro
-      - ./localhost+1-key.pem:/certs/key.pem:ro
-    command: >
-      sh -c "node -e \"
-        const https = require('https');
-        const http = require('http');
-        const fs = require('fs');
-        const server = https.createServer({
-          key: fs.readFileSync('/certs/key.pem'),
-          cert: fs.readFileSync('/certs/cert.pem')
-        }, (req, res) => {
-          const proxy = http.request({ hostname: 'app', port: 3000, path: req.url, method: req.method, headers: req.headers }, (proxyRes) => {
-            res.writeHead(proxyRes.statusCode, proxyRes.headers);
-            proxyRes.pipe(res);
-          });
-          proxy.on('error', () => { res.writeHead(502); res.end('App not ready'); });
-          req.pipe(proxy);
-        });
-        server.listen(3443, '0.0.0.0', () => console.log('SSL proxy: https://0.0.0.0:3443 -> http://app:3000'));
-      \""
-    depends_on:
-      - app
-
 volumes:
-  supabase-db:
+  db-data:
   redis-data:
