@@ -10,7 +10,8 @@
     "ssl-proxy": "npx local-ssl-proxy --source 3443 --target 3000 --cert localhost+1.pem --key localhost+1-key.pem",
     "dev:https": "npm run dev & npm run ssl-proxy",
     "worker": "npx tsx worker.ts",
-    "worker:dev": "npx tsx watch worker.ts"
+    "worker:dev": "npx tsx watch worker.ts",
+    "dev:all": "npm run dev & npm run worker:dev"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

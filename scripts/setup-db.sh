@@ -5,7 +5,7 @@
 
 set -e
 
-CONTAINER="${DB_CONTAINER:-media_publisher-db-1}"
+CONTAINER="${DB_CONTAINER:-mediahub-database}"
 DB_USER="supabase_admin"
 DB_PASS="postgres"
 DB_NAME="supabase"
@@ -52,7 +52,7 @@ echo "   OK"
 
 # 6. Reload PostgREST schema cache (so it knows about new tables)
 echo "6. Reloading PostgREST schema cache..."
-docker restart media_publisher-rest-1 >/dev/null 2>&1 || true
+docker restart mediahub-rest >/dev/null 2>&1 || true
 echo "   OK"
 
 # 7. Create default super admin
