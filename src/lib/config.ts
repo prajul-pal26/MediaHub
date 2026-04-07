@@ -31,8 +31,8 @@ function env(name: string, devDefault: string): string {
 // ─── Exported Config ───
 
 export const config = {
-  /** The public-facing app URL (e.g., https://app.mediahub.io or https://localhost:3443) */
-  appUrl: env("NEXT_PUBLIC_APP_URL", "https://localhost:3443"),
+  /** The public-facing app URL (e.g., https://app.mediahub.io or http://localhost:3000) */
+  appUrl: env("NEXT_PUBLIC_APP_URL", "http://localhost:3000"),
 
   /** Supabase PostgreSQL URL */
   supabaseUrl: env("NEXT_PUBLIC_SUPABASE_URL", "http://127.0.0.1:54321"),

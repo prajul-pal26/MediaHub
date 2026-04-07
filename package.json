@@ -7,8 +7,6 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "ssl-proxy": "npx local-ssl-proxy --source 3443 --target 3000 --cert localhost+1.pem --key localhost+1-key.pem",
-    "dev:https": "npm run dev & npm run ssl-proxy",
     "worker": "npx tsx worker.ts",
     "worker:dev": "npx tsx watch worker.ts",
     "dev:all": "npm run dev & npm run worker:dev"
@@ -59,7 +57,6 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
-    "local-ssl-proxy": "^2.0.5",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

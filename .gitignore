@@ -22,9 +22,7 @@
 
 # misc
 .DS_Store
-*.pem
 *.deb
-mkcert-*
 
 # debug
 npm-debug.log*

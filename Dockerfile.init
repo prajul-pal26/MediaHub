@@ -1,9 +1,0 @@
-# Init container — runs schema, migrations, creates admin user
-FROM postgres:15-alpine
-RUN apk add --no-cache curl bash
-WORKDIR /app
-COPY src/server/db/schema.sql src/server/db/schema.sql
-COPY supabase/migrations/ supabase/migrations/
-COPY scripts/docker-init.sh scripts/docker-init.sh
-RUN chmod +x scripts/docker-init.sh
-CMD ["bash", "scripts/docker-init.sh"]
