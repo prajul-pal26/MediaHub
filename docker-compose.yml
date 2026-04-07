@@ -208,7 +208,7 @@ services:
       redis:
         condition: service_healthy
 
-  # ─── SSL Proxy (HTTPS on port 3443 → HTTP on port 3000) ───
+  # ─── SSL Proxy (HTTPS on port 3443 → HTTP app:3000) ───
   ssl-proxy:
     image: node:20-alpine
     restart: unless-stopped
@@ -218,8 +218,23 @@ services:
       - ./localhost+1.pem:/certs/cert.pem:ro
       - ./localhost+1-key.pem:/certs/key.pem:ro
     command: >
-      sh -c "npm install -g local-ssl-proxy &&
-             local-ssl-proxy --source 3443 --target 3000 --hostname 0.0.0.0 --cert /certs/cert.pem --key /certs/key.pem --targetHost app"
+      sh -c "node -e \"
+        const https = require('https');
+        const http = require('http');
+        const fs = require('fs');
+        const server = https.createServer({
+          key: fs.readFileSync('/certs/key.pem'),
+          cert: fs.readFileSync('/certs/cert.pem')
+        }, (req, res) => {
+          const proxy = http.request({ hostname: 'app', port: 3000, path: req.url, method: req.method, headers: req.headers }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          proxy.on('error', () => { res.writeHead(502); res.end('App not ready'); });
+          req.pipe(proxy);
+        });
+        server.listen(3443, '0.0.0.0', () => console.log('SSL proxy: https://0.0.0.0:3443 -> http://app:3000'));
+      \""
     depends_on:
       - app
 
