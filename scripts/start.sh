@@ -47,7 +47,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzd
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
 REDIS_URL=redis://localhost:6379
 TOKEN_ENCRYPTION_KEY=${ENCRYPTION_KEY}
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=https://localhost:3443
 CRON_SECRET=dev-cron-secret
 EOF
   echo "  Created .env.local"
@@ -57,6 +57,16 @@ fi
 if [ ! -d node_modules ]; then
   echo "Installing dependencies..."
   npm install
+fi
+
+# ─── Generate SSL certs (required for Instagram/Facebook OAuth) ───
+if [ ! -f localhost+1.pem ] || [ ! -f localhost+1-key.pem ]; then
+  echo "Generating SSL certificates..."
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout localhost+1-key.pem -out localhost+1.pem \
+    -days 365 -nodes -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null
+  echo "  SSL certs generated"
 fi
 
 # ─── Start Docker services ───
@@ -135,7 +145,7 @@ echo "=========================================="
 echo "  MediaHub is running!"
 echo "=========================================="
 echo ""
-echo "  App:     http://localhost:3000"
+echo "  App:     https://localhost:3443 (or http://localhost:3000)"
 echo "  Studio:  http://localhost:54323"
 echo "  Email:   http://localhost:54324"
 echo ""
