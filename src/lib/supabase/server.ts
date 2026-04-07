@@ -2,11 +2,14 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+// Server-side uses SUPABASE_INTERNAL_URL (Docker internal) if available, falls back to NEXT_PUBLIC_SUPABASE_URL
+const serverSupabaseUrl = process.env.SUPABASE_INTERNAL_URL || process.env.NEXT_PUBLIC_SUPABASE_URL!;
+
 export async function createServerSupabaseClient() {
   const cookieStore = await cookies();
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    serverSupabaseUrl,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
@@ -33,7 +36,7 @@ let _serviceClient: ReturnType<typeof createClient> | null = null;
 export function createServiceRoleClient() {
   if (!_serviceClient) {
     _serviceClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      serverSupabaseUrl,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       {
         auth: {
