@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+*.pem
+.env.local
+.env.production
+supabase-db
+redis-data

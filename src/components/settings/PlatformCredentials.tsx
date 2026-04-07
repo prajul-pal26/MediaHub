@@ -88,19 +88,19 @@ const platforms: PlatformConfig[] = [
     shortLabel: "Instagram",
     icon: <InstagramLogo />,
     fields: [
-      { key: "client_id", label: "Facebook App ID", type: "id" },
-      { key: "client_secret", label: "Facebook App Secret", type: "secret" },
+      { key: "client_id", label: "Instagram App ID", type: "id" },
+      { key: "client_secret", label: "Instagram App Secret", type: "secret" },
     ],
     showRedirectUri: true,
     callbackPath: "/api/callback/instagram",
     setupGuide: [
       "Go to developers.facebook.com and log in",
-      "Click 'My Apps' → 'Create App' → select 'Business' type",
-      "In App Dashboard → 'App Settings' → 'Basic' — copy App ID and App Secret",
-      "Add products: 'Instagram Basic Display' and 'Instagram Graph API'",
-      "In 'Instagram Basic Display' → Settings → add the Redirect URI shown below",
-      "Go to 'App Review' → request: instagram_basic, instagram_content_publish, instagram_manage_insights, pages_show_list",
-      "Users must have a Business/Creator Instagram account connected to a Facebook Page",
+      "Click 'My Apps' → select your app",
+      "In left sidebar → Instagram → 'API setup with Instagram login'",
+      "Copy the Instagram App ID and Instagram App Secret from that page",
+      "In 'Facebook Login for Business' → Settings → add the Redirect URI shown below",
+      "Add Instagram testers in App Roles → Roles → Add People → Instagram Tester",
+      "Testers must accept the invite in Instagram → Settings → Apps and websites → Tester invites",
     ],
   },
   {
@@ -464,7 +464,7 @@ function PlatformDetailModal({
   }, [config, existingCred]);
 
   if (!config) return null;
-  const appUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || (typeof window !== "undefined" ? window.location.origin : "");
 
   async function handleSave() {
     if (!config) return;

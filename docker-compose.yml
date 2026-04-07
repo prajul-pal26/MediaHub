@@ -1,5 +1,5 @@
 services:
-  # Supabase PostgreSQL
+  # ─── Supabase PostgreSQL ───
   db:
     image: supabase/postgres:15.6.1.143
     restart: unless-stopped
@@ -13,8 +13,13 @@ services:
     volumes:
       - supabase-db:/var/lib/postgresql/data
       - ./supabase/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d supabase"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-  # Supabase Studio
+  # ─── Supabase Studio (Database UI) ───
   studio:
     image: supabase/studio:20240422-5cf8f30
     restart: unless-stopped
@@ -29,7 +34,7 @@ services:
     depends_on:
       - kong
 
-  # Supabase Kong API Gateway
+  # ─── Supabase Kong API Gateway ───
   kong:
     image: kong:2.8.1
     restart: unless-stopped
@@ -49,7 +54,7 @@ services:
       - rest
       - auth
 
-  # Supabase Auth (GoTrue)
+  # ─── Supabase Auth (GoTrue) ───
   auth:
     image: supabase/gotrue:v2.151.0
     restart: unless-stopped
@@ -70,14 +75,15 @@ services:
       GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
       GOTRUE_MAILER_AUTOCONFIRM: "true"
       GOTRUE_SMTP_ADMIN_EMAIL: admin@localhost
-      GOTRUE_SMTP_HOST: ""
-      GOTRUE_SMTP_PORT: "0"
+      GOTRUE_SMTP_HOST: inbucket
+      GOTRUE_SMTP_PORT: "2500"
       GOTRUE_SMTP_SENDER_NAME: MediaHub
       GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Supabase REST (PostgREST)
+  # ─── Supabase REST (PostgREST) ───
   rest:
     image: postgrest/postgrest:v12.0.1
     restart: unless-stopped
@@ -88,9 +94,10 @@ services:
       PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
       PGRST_DB_USE_LEGACY_GUCS: "false"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Supabase Realtime
+  # ─── Supabase Realtime ───
   realtime:
     image: supabase/realtime:v2.28.32
     restart: unless-stopped
@@ -111,9 +118,10 @@ services:
       ENABLE_TAILSCALE: "false"
       DNS_NODES: "''"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Supabase Meta (for Studio)
+  # ─── Supabase Meta (for Studio) ───
   meta:
     image: supabase/postgres-meta:v0.80.0
     restart: unless-stopped
@@ -125,9 +133,10 @@ services:
       PG_META_DB_USER: supabase_admin
       PG_META_DB_PASSWORD: postgres
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
-  # Redis (for BullMQ)
+  # ─── Redis (for BullMQ) ───
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -135,6 +144,84 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Inbucket (Email testing) ───
+  inbucket:
+    image: inbucket/inbucket:latest
+    restart: unless-stopped
+    ports:
+      - "54324:9000"   # Web UI
+      - "2500:2500"    # SMTP
+
+  # ─── Next.js App (Frontend + tRPC API) ───
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: http://kong:8000
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      REDIS_URL: redis://redis:6379
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2}
+      NEXT_PUBLIC_APP_URL: https://localhost:3443
+      CRON_SECRET: dev-cron-secret
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+    depends_on:
+      kong:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ─── BullMQ Worker (publish, analytics, token refresh) ───
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: http://kong:8000
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      REDIS_URL: redis://redis:6379
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2}
+      NEXT_PUBLIC_APP_URL: https://localhost:3443
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npx tsx watch worker.ts
+    depends_on:
+      kong:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ─── SSL Proxy (HTTPS on port 3443 → HTTP on port 3000) ───
+  ssl-proxy:
+    image: node:20-alpine
+    restart: unless-stopped
+    ports:
+      - "3443:3443"
+    volumes:
+      - ./localhost+1.pem:/certs/cert.pem:ro
+      - ./localhost+1-key.pem:/certs/key.pem:ro
+    command: >
+      sh -c "npm install -g local-ssl-proxy &&
+             local-ssl-proxy --source 3443 --target 3000 --hostname 0.0.0.0 --cert /certs/cert.pem --key /certs/key.pem --targetHost app"
+    depends_on:
+      - app
 
 volumes:
   supabase-db:

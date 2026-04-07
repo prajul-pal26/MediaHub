@@ -16,17 +16,19 @@ export async function GET(
   const error = searchParams.get("error");
   const stateParam = searchParams.get("state");
 
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || request.url;
+
   console.log(`[social-callback] Platform: ${platform}, code: ${code ? "yes" : "no"}, error: ${error}`);
 
   if (error) {
     return NextResponse.redirect(
-      new URL(`/accounts?error=${encodeURIComponent(error)}`, request.url)
+      new URL(`/accounts?error=${encodeURIComponent(error)}`, baseUrl)
     );
   }
 
   if (!code || !stateParam) {
     return NextResponse.redirect(
-      new URL("/accounts?error=missing_code_or_state", request.url)
+      new URL("/accounts?error=missing_code_or_state", baseUrl)
     );
   }
 
@@ -35,7 +37,7 @@ export async function GET(
     state = verifyState(stateParam);
   } catch {
     return NextResponse.redirect(
-      new URL("/accounts?error=invalid_state", request.url)
+      new URL("/accounts?error=invalid_state", baseUrl)
     );
   }
 
@@ -52,7 +54,7 @@ export async function GET(
 
     if (!creds) {
       return NextResponse.redirect(
-        new URL(`/accounts?error=credentials_not_configured_for_${platform}`, request.url)
+        new URL(`/accounts?error=credentials_not_configured_for_${platform}`, baseUrl)
       );
     }
 
@@ -86,7 +88,7 @@ export async function GET(
       if (tokenData.error) {
         console.error("[social-callback] YouTube token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, baseUrl)
         );
       }
 
@@ -129,7 +131,7 @@ export async function GET(
 
         console.log(`[social-callback] YouTube: ${allChannels.length} channels found, pending selection ${pendingId}`);
         return NextResponse.redirect(
-          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
+          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, baseUrl)
         );
       }
 
@@ -142,97 +144,71 @@ export async function GET(
       console.log("[social-callback] YouTube connected:", platformUsername);
     }
 
-    // ─── Instagram ───
+    // ─── Instagram (Instagram Login API) ───
     else if (platform === "instagram") {
-      const tokenRes = await fetch(
-        `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${clientSecret}&code=${code}`
-      );
+      console.log("[social-callback] Instagram redirect_uri for token exchange:", redirectUri);
+      // Step 1: Exchange code for short-lived token (Instagram requires multipart/form-data)
+      const tokenBody = new FormData();
+      tokenBody.append("client_id", clientId);
+      tokenBody.append("client_secret", clientSecret);
+      tokenBody.append("grant_type", "authorization_code");
+      tokenBody.append("redirect_uri", redirectUri);
+      tokenBody.append("code", code);
+      const tokenRes = await fetch("https://api.instagram.com/oauth/access_token", {
+        method: "POST",
+        body: tokenBody,
+      });
       const tokenData = await tokenRes.json();
 
-      if (tokenData.error) {
+      if (tokenData.error_type || tokenData.error_message) {
         console.error("[social-callback] Instagram token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error?.message || "Instagram auth failed")}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_message || "Instagram auth failed")}`, baseUrl)
         );
       }
 
-      accessToken = tokenData.access_token;
+      const shortLivedToken = tokenData.access_token;
+      const igUserId = String(tokenData.user_id);
 
-      // Get ALL pages
-      const pagesRes = await fetch(
-        `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
+      // Step 2: Exchange for long-lived token (60 days)
+      const longLivedRes = await fetch(
+        `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${clientSecret}&access_token=${shortLivedToken}`
       );
-      const pagesData = await pagesRes.json();
-      const allPages = pagesData.data || [];
+      const longLivedData = await longLivedRes.json();
 
-      if (allPages.length === 0) {
+      if (longLivedData.error) {
+        console.error("[social-callback] Instagram long-lived token error:", longLivedData);
+        // Fall back to short-lived token
+        accessToken = shortLivedToken;
+      } else {
+        accessToken = longLivedData.access_token;
+        if (longLivedData.expires_in) {
+          expiresAt = new Date(Date.now() + longLivedData.expires_in * 1000).toISOString();
+        }
+      }
+
+      // Step 3: Get user profile
+      const profileRes = await fetch(
+        `https://graph.instagram.com/v21.0/me?fields=user_id,username,account_type,profile_picture_url&access_token=${accessToken}`
+      );
+      const profileData = await profileRes.json();
+
+      if (profileData.error) {
+        console.error("[social-callback] Instagram profile error:", profileData);
         return NextResponse.redirect(
-          new URL("/accounts?error=No+Facebook+Page+found.+Instagram+requires+a+Business/Creator+account+connected+to+a+Facebook+Page.", request.url)
+          new URL(`/accounts?error=${encodeURIComponent(profileData.error?.message || "Failed to get Instagram profile")}`, baseUrl)
         );
       }
 
-      // Resolve IG business accounts for all pages
-      const channels: Array<{
-        pageId: string;
-        pageName: string;
-        pageToken: string;
-        igAccountId: string;
-        igUsername: string;
-      }> = [];
+      platformUserId = profileData.user_id || igUserId;
+      platformUsername = profileData.username || "";
+      platformMetadata = {
+        account_type: profileData.account_type,
+        profile_picture_url: profileData.profile_picture_url,
+        ig_user_id: igUserId,
+      };
 
-      for (const page of allPages) {
-        const pageToken = page.access_token;
-        const igRes = await fetch(
-          `https://graph.facebook.com/v19.0/${page.id}?fields=instagram_business_account{id,username}&access_token=${pageToken}`
-        );
-        const igData = await igRes.json();
-        channels.push({
-          pageId: page.id,
-          pageName: page.name || page.id,
-          pageToken,
-          igAccountId: igData.instagram_business_account?.id || page.id,
-          igUsername: igData.instagram_business_account?.username || page.name || "",
-        });
-      }
-
-      if (channels.length > 1) {
-        // Multiple pages — store in Redis and let user pick
-        const pendingId = randomUUID();
-        const redis = getRedis();
-        await redis.set(
-          `pending_channels:${pendingId}`,
-          JSON.stringify({
-            platform,
-            brandId: state.brandId,
-            orgId: state.orgId,
-            userAccessToken: accessToken,
-            refreshToken: null,
-            expiresAt: null,
-            channels: channels.map((ch) => ({
-              id: ch.igAccountId,
-              name: ch.igUsername || ch.pageName,
-              pageId: ch.pageId,
-              pageToken: ch.pageToken,
-            })),
-          }),
-          "EX",
-          600 // 10 minutes TTL
-        );
-
-        console.log(`[social-callback] Instagram: ${channels.length} pages found, pending selection ${pendingId}`);
-        return NextResponse.redirect(
-          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
-        );
-      }
-
-      // Single page — auto-connect as before
-      const ch = channels[0];
-      platformUserId = ch.igAccountId;
-      platformUsername = ch.igUsername || ch.pageName;
-      platformMetadata = { page_id: ch.pageId, page_access_token_encrypted: encrypt(ch.pageToken) };
-      accessToken = ch.pageToken;
-
-      console.log("[social-callback] Instagram connected:", platformUsername);
+      console.log("[social-callback] Instagram connected via Instagram Login:", platformUsername);
     }
 
     // ─── LinkedIn ───
@@ -253,7 +229,7 @@ export async function GET(
       if (tokenData.error) {
         console.error("[social-callback] LinkedIn token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, baseUrl)
         );
       }
 
@@ -283,7 +259,7 @@ export async function GET(
       if (tokenData.error) {
         console.error("[social-callback] Facebook token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error?.message || "Facebook auth failed")}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error?.message || "Facebook auth failed")}`, baseUrl)
         );
       }
 
@@ -298,7 +274,7 @@ export async function GET(
 
       if (allPages.length === 0) {
         return NextResponse.redirect(
-          new URL("/accounts?error=No+Facebook+Page+found.+Please+ensure+your+account+has+at+least+one+Page.", request.url)
+          new URL("/accounts?error=No+Facebook+Page+found.+Please+ensure+your+account+has+at+least+one+Page.", baseUrl)
         );
       }
 
@@ -328,7 +304,7 @@ export async function GET(
 
         console.log(`[social-callback] Facebook: ${allPages.length} pages found, pending selection ${pendingId}`);
         return NextResponse.redirect(
-          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, request.url)
+          new URL(`/accounts?pending_channels=${pendingId}&platform=${platform}`, baseUrl)
         );
       }
 
@@ -361,7 +337,7 @@ export async function GET(
       if (tokenData.error || !tokenData.access_token) {
         console.error("[social-callback] TikTok token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error || "TikTok auth failed")}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error || "TikTok auth failed")}`, baseUrl)
         );
       }
 
@@ -390,7 +366,7 @@ export async function GET(
       const codeVerifier = state.codeVerifier;
       if (!codeVerifier) {
         return NextResponse.redirect(
-          new URL("/accounts?error=missing_code_verifier_for_twitter", request.url)
+          new URL("/accounts?error=missing_code_verifier_for_twitter", baseUrl)
         );
       }
 
@@ -413,7 +389,7 @@ export async function GET(
       if (tokenData.error) {
         console.error("[social-callback] Twitter token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, baseUrl)
         );
       }
 
@@ -454,7 +430,7 @@ export async function GET(
       if (tokenData.error) {
         console.error("[social-callback] Snapchat token error:", tokenData);
         return NextResponse.redirect(
-          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, request.url)
+          new URL(`/accounts?error=${encodeURIComponent(tokenData.error_description || tokenData.error)}`, baseUrl)
         );
       }
 
@@ -479,7 +455,7 @@ export async function GET(
 
     else {
       return NextResponse.redirect(
-        new URL(`/accounts?error=unsupported_platform_${platform}`, request.url)
+        new URL(`/accounts?error=unsupported_platform_${platform}`, baseUrl)
       );
     }
 
@@ -530,7 +506,7 @@ export async function GET(
       }
 
       return NextResponse.redirect(
-        new URL(`/accounts?connected=${platform}&updated=true`, request.url)
+        new URL(`/accounts?connected=${platform}&updated=true`, baseUrl)
       );
     }
 
@@ -551,7 +527,7 @@ export async function GET(
     if (insertError) {
       console.error("[social-callback] DB insert error:", insertError);
       return NextResponse.redirect(
-        new URL(`/accounts?error=${encodeURIComponent(insertError.message)}`, request.url)
+        new URL(`/accounts?error=${encodeURIComponent(insertError.message)}`, baseUrl)
       );
     }
 
@@ -581,12 +557,12 @@ export async function GET(
     }
 
     return NextResponse.redirect(
-      new URL(`/accounts?connected=${platform}`, request.url)
+      new URL(`/accounts?connected=${platform}`, baseUrl)
     );
   } catch (e: any) {
     console.error("[social-callback] Error:", e.message);
     return NextResponse.redirect(
-      new URL(`/accounts?error=${encodeURIComponent(e.message)}`, request.url)
+      new URL(`/accounts?error=${encodeURIComponent(e.message)}`, baseUrl)
     );
   }
 }

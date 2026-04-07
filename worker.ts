@@ -139,11 +139,11 @@ async function createTempPublicUrl(driveFileId: string, oauth2: any): Promise<{ 
   };
 }
 
-async function waitForIgContainer(containerId: string, accessToken: string, maxWaitMs = 120000): Promise<void> {
+async function waitForIgContainer(containerId: string, accessToken: string, maxWaitMs = 120000, apiBase = "https://graph.facebook.com/v19.0"): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const res = await fetchWithTimeout(
-      `https://graph.facebook.com/v19.0/${containerId}?fields=status_code&access_token=${accessToken}`
+      `${apiBase}/${containerId}?fields=status_code&access_token=${accessToken}`
     );
     const data = await res.json();
     if (data.status_code === "FINISHED") return;
@@ -223,9 +223,12 @@ async function publishToYouTube(asset: any, account: any, action: string, orgId:
 
 async function publishToInstagram(asset: any, account: any, action: string, orgId: string, brandId: string, groupId: string, platformMeta: any): Promise<string> {
   const igUserId = account.platform_user_id;
+  // Support both Instagram Login (direct token) and legacy Facebook Login (page token)
   const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
-  if (!encryptedPageToken) throw new Error("Instagram account missing page access token — reconnect the account");
-  const pageAccessToken = decrypt(encryptedPageToken);
+  const pageAccessToken = encryptedPageToken
+    ? decrypt(encryptedPageToken)
+    : decrypt(account.access_token_encrypted);
+  const igApiBase = encryptedPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
   const caption = platformMeta?.caption || "";
 
   const driveOAuth = await getDriveClient(orgId, brandId);
@@ -251,7 +254,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         const isItemVideo = (carouselAsset.file_type || "").startsWith("video/");
 
         const containerRes = await fetchWithTimeout(
-          `https://graph.facebook.com/v19.0/${igUserId}/media`,
+          `${igApiBase}/${igUserId}/media`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -270,14 +273,14 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
 
         // For videos, wait until ready
         if (isItemVideo) {
-          await waitForIgContainer(containerData.id, pageAccessToken);
+          await waitForIgContainer(containerData.id, pageAccessToken, 120000, igApiBase);
         }
         await itemCleanup();
       }
 
       // Create carousel container
       const carouselRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${igUserId}/media`,
+        `${igApiBase}/${igUserId}/media`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -294,7 +297,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
 
       // Publish carousel
       const publishRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${igUserId}/media_publish`,
+        `${igApiBase}/${igUserId}/media_publish`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -330,7 +333,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
 
       // Create container
       const containerRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${igUserId}/media`,
+        `${igApiBase}/${igUserId}/media`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -342,12 +345,12 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
 
       // For videos, wait for processing
       if (isVideo) {
-        await waitForIgContainer(containerData.id, pageAccessToken);
+        await waitForIgContainer(containerData.id, pageAccessToken, 120000, igApiBase);
       }
 
       // Publish
       const publishRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${igUserId}/media_publish`,
+        `${igApiBase}/${igUserId}/media_publish`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1038,7 +1041,7 @@ const publishWorker = new Worker(
 
     console.log(`[publish] Processing job ${publishJobId}: ${action}`);
 
-    await db().from("publish_jobs").update({ status: "processing", updated_at: new Date().toISOString() }).eq("id", publishJobId);
+    await db().from("publish_jobs").update({ status: "processing" }).eq("id", publishJobId);
 
     try {
       const { data: asset, error: assetErr } = await db().from("media_assets").select("*").eq("id", assetId).single();
@@ -1088,7 +1091,6 @@ const publishWorker = new Worker(
       await db().from("publish_jobs").update({
         status: "completed",
         completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
         platform_post_id: platformPostId,
       }).eq("id", publishJobId);
 
@@ -1119,7 +1121,6 @@ const publishWorker = new Worker(
         status: job.attemptsMade + 1 >= 3 ? "dead" : "failed",
         error_message: error.message,
         attempt_count: job.attemptsMade + 1,
-        updated_at: new Date().toISOString(),
       }).eq("id", publishJobId);
 
       throw error;
@@ -1140,7 +1141,7 @@ publishWorker.on("failed", async (job, err) => {
   if (job && job.attemptsMade >= 3) {
     console.log(`[publish] Job ${job.id} moved to dead letter queue`);
     const { publishJobId, postId, groupId } = job.data;
-    await db().from("publish_jobs").update({ status: "dead", updated_at: new Date().toISOString() }).eq("id", publishJobId);
+    await db().from("publish_jobs").update({ status: "dead" }).eq("id", publishJobId);
 
     // Check sibling jobs to determine post status
     const { data: allJobs } = await db().from("publish_jobs").select("status").eq("post_id", postId);
@@ -1237,14 +1238,16 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
 }
 
 async function fetchInstagramAnalytics(account: any, platformPostId: string) {
-  const pageToken = account.platform_metadata?.page_access_token_encrypted
-    ? decrypt(account.platform_metadata.page_access_token_encrypted)
-    : null;
+  const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
+  const pageToken = encryptedPageToken
+    ? decrypt(encryptedPageToken)
+    : decrypt(account.access_token_encrypted);
   if (!pageToken) return null;
+  const apiBase = encryptedPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
   // Get basic metrics + media type first (this almost always works)
   const mediaRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${platformPostId}?fields=like_count,comments_count,timestamp,media_type&access_token=${pageToken}`
+    `${apiBase}/${platformPostId}?fields=like_count,comments_count,timestamp,media_type&access_token=${pageToken}`
   );
   const mediaData = await mediaRes.json();
   if (mediaData.error) {
@@ -1269,7 +1272,7 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
       : "impressions,reach,saved";
 
     const insightsRes = await fetchWithTimeout(
-      `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=${metrics}&access_token=${pageToken}`
+      `${apiBase}/${platformPostId}/insights?metric=${metrics}&access_token=${pageToken}`
     );
     const insightsData = await insightsRes.json();
 
@@ -1587,14 +1590,16 @@ async function appendAnalyticsHistory(postId: string, socialAccountId: string, a
 
 async function importInstagramHistory(account: any, brandId: string, _orgId: string): Promise<number> {
   const igUserId = account.platform_user_id;
-  const pageToken = account.platform_metadata?.page_access_token_encrypted
-    ? decrypt(account.platform_metadata.page_access_token_encrypted)
-    : null;
-  if (!pageToken) throw new Error("No page access token");
+  const encryptedPageToken = account.platform_metadata?.page_access_token_encrypted;
+  const pageToken = encryptedPageToken
+    ? decrypt(encryptedPageToken)
+    : decrypt(account.access_token_encrypted);
+  if (!pageToken) throw new Error("No access token for Instagram");
+  const apiBase = encryptedPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
   console.log(`[historical] Importing Instagram history for @${account.platform_username}...`);
 
-  let url: string | null = `https://graph.facebook.com/v19.0/${igUserId}/media?fields=id,caption,media_type,media_url,thumbnail_url,timestamp,like_count,comments_count,permalink&limit=50&access_token=${pageToken}`;
+  let url: string | null = `${apiBase}/${igUserId}/media?fields=id,caption,media_type,media_url,thumbnail_url,timestamp,like_count,comments_count,permalink&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
   while (url && totalImported < 500) {
@@ -2537,7 +2542,6 @@ const tokenWorker = new Worker(
       await db().from("publish_jobs").update({
         status: "failed",
         error_message: "Job timed out (stuck in processing for over 10 minutes)",
-        updated_at: new Date().toISOString(),
       }).eq("id", zombie.id);
 
       // Check if post needs status update
@@ -3072,14 +3076,16 @@ const competitorFetchWorker = new Worker(
               .select("*").eq("brand_id", brandId).eq("platform", "instagram").eq("is_active", true).limit(1).single();
 
             if (igAccount) {
-              const pageToken = igAccount.platform_metadata?.page_access_token_encrypted
-                ? decrypt(igAccount.platform_metadata.page_access_token_encrypted)
-                : null;
+              const igEncPageToken = igAccount.platform_metadata?.page_access_token_encrypted;
+              const pageToken = igEncPageToken
+                ? decrypt(igEncPageToken)
+                : decrypt(igAccount.access_token_encrypted);
               const igUserId = igAccount.platform_user_id;
+              const igApiUrl = igEncPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
               if (pageToken && igUserId) {
                 const discoveryRes = await fetchWithTimeout(
-                  `https://graph.facebook.com/v19.0/${igUserId}?fields=business_discovery.fields(followers_count,media_count,media.limit(5){like_count,comments_count,timestamp}){followers_count,media_count,media}&username=${encodeURIComponent(comp.competitor_handle)}&access_token=${pageToken}`
+                  `${igApiUrl}/${igUserId}?fields=business_discovery.fields(followers_count,media_count,media.limit(5){like_count,comments_count,timestamp}){followers_count,media_count,media}&username=${encodeURIComponent(comp.competitor_handle)}&access_token=${pageToken}`
                 );
                 const discoveryData = await discoveryRes.json();
                 const bd = discoveryData.business_discovery;
@@ -3392,17 +3398,19 @@ function detectSentiment(text: string): string {
 }
 
 async function syncInstagramComments(account: any, brandId: string) {
-  const pageToken = account.platform_metadata?.page_access_token_encrypted
-    ? decrypt(account.platform_metadata.page_access_token_encrypted)
-    : null;
+  const igEncPageToken = account.platform_metadata?.page_access_token_encrypted;
+  const pageToken = igEncPageToken
+    ? decrypt(igEncPageToken)
+    : decrypt(account.access_token_encrypted);
   if (!pageToken) return 0;
+  const igApiBase = igEncPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
   const igUserId = account.platform_user_id;
   let synced = 0;
 
   // Get recent media to fetch comments from
   const mediaRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${igUserId}/media?fields=id,caption,timestamp&limit=25&access_token=${pageToken}`
+    `${igApiBase}/${igUserId}/media?fields=id,caption,timestamp&limit=25&access_token=${pageToken}`
   );
   const mediaData = await mediaRes.json();
   if (mediaData.error) {
@@ -3414,7 +3422,7 @@ async function syncInstagramComments(account: any, brandId: string) {
     try {
       // Fetch top-level comments for this media
       const commentsRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${media.id}/comments?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
+        `${igApiBase}/${media.id}/comments?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
       );
       const commentsData = await commentsRes.json();
       if (commentsData.error) continue;
@@ -3433,7 +3441,7 @@ async function syncInstagramComments(account: any, brandId: string) {
         let repliesData: any[] = [];
         try {
           const repliesRes = await fetchWithTimeout(
-            `https://graph.facebook.com/v19.0/${comment.id}/replies?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
+            `${igApiBase}/${comment.id}/replies?fields=id,text,username,timestamp,like_count&limit=50&access_token=${pageToken}`
           );
           const repliesJson = await repliesRes.json();
           if (!repliesJson.error) {
@@ -4072,13 +4080,15 @@ const commentSyncWorker = new Worker(
 // ─── Comment Reply Worker ───
 
 async function postInstagramReply(comment: any, replyText: string, account: any): Promise<string> {
-  const pageToken = account.platform_metadata?.page_access_token_encrypted
-    ? decrypt(account.platform_metadata.page_access_token_encrypted)
-    : null;
-  if (!pageToken) throw new Error("No Instagram page access token");
+  const igEncPageToken = account.platform_metadata?.page_access_token_encrypted;
+  const pageToken = igEncPageToken
+    ? decrypt(igEncPageToken)
+    : decrypt(account.access_token_encrypted);
+  if (!pageToken) throw new Error("No Instagram access token");
+  const igApiBase = igEncPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
   const res = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${comment.platform_comment_id}/replies`,
+    `${igApiBase}/${comment.platform_comment_id}/replies`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

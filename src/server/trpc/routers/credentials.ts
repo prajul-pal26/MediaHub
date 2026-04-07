@@ -250,20 +250,29 @@ export const credentialsRouter = router({
           return { success: false, error: `Google responded: ${data.error_description || data.error || "Unknown error"}` };
         }
 
-        // ─── Instagram / Meta ───
+        // ─── Instagram / Meta (Instagram Login API) ───
         if (input.platform === "instagram") {
-          // Verify by calling Facebook's OAuth debug endpoint
-          // A real token exchange with dummy code tells us if app ID/secret are valid
-          const res = await fetch(
-            `https://graph.facebook.com/v19.0/oauth/access_token?` +
-            `client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`
-          );
+          // Verify by attempting a token exchange with a dummy code
+          // Instagram API will return "invalid code" if credentials are valid, or "invalid client" if not
+          const formData = new FormData();
+          formData.append("client_id", clientId);
+          formData.append("client_secret", clientSecret);
+          formData.append("grant_type", "authorization_code");
+          formData.append("redirect_uri", cred.redirect_uri || `${process.env.NEXT_PUBLIC_APP_URL}/api/callback/instagram`);
+          formData.append("code", "test_invalid_code");
+          const res = await fetch("https://api.instagram.com/oauth/access_token", {
+            method: "POST",
+            body: formData,
+          });
           const data = await res.json();
-          if (data.access_token) {
-            return { success: true, message: "Instagram/Meta credentials verified — App ID and Secret are valid" };
+          // "Invalid authorization code" = credentials are valid, code is wrong (expected)
+          // "Invalid platform app" or "invalid client_id" = credentials are wrong
+          const errMsg = data.error_message || data.error?.message || "";
+          if (errMsg.toLowerCase().includes("authorization code") || errMsg.toLowerCase().includes("code")) {
+            return { success: true, message: "Instagram credentials verified — App ID and Secret are valid" };
           }
-          if (data.error) {
-            return { success: false, error: `Facebook: ${data.error.message || data.error.type || "Invalid credentials"}` };
+          if (data.error_type || data.error) {
+            return { success: false, error: `Instagram: ${errMsg || data.error_type || "Invalid credentials"}` };
           }
           return { success: false, error: "Could not verify Instagram credentials" };
         }
