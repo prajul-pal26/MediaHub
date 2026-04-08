@@ -11,7 +11,8 @@ import { Readable } from "stream";
 // ─── Setup ───
 
 if (!process.env.REDIS_URL) throw new Error("REDIS_URL is not set");
-if (!process.env.NEXT_PUBLIC_SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+if (!SUPABASE_URL) throw new Error("SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL is not set");
 if (!process.env.SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not set");
 
 const redis = new Redis(process.env.REDIS_URL, {
@@ -19,7 +20,7 @@ const redis = new Redis(process.env.REDIS_URL, {
 });
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
@@ -1267,9 +1268,9 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
   let videoViews = 0;
 
   try {
-    const metrics = isVideo
-      ? "impressions,reach,saved,video_views,plays"
-      : "impressions,reach,saved";
+    // Use new Instagram API metrics: views,reach,saved,total_interactions,shares,likes,comments
+    // Note: "impressions" and "plays" are deprecated — "views" replaces both
+    const metrics = "views,reach,saved,total_interactions,shares,likes,comments";
 
     const insightsRes = await fetchWithTimeout(
       `${apiBase}/${platformPostId}/insights?metric=${metrics}&access_token=${pageToken}`
@@ -1280,10 +1281,11 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
       const insightsList = insightsData.data || [];
       const getMetric = (name: string) => insightsList.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
 
-      impressions = getMetric("impressions");
+      impressions = getMetric("views"); // views replaces impressions
       reach = getMetric("reach");
       saved = getMetric("saved");
-      videoViews = getMetric("video_views") || getMetric("plays");
+      engagementMetric = getMetric("total_interactions");
+      videoViews = getMetric("views");
     } else {
       console.warn(`[analytics] IG insights unavailable for ${platformPostId}: ${insightsData.error.message}`);
     }
@@ -1296,13 +1298,9 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
   // For images: impressions > reach > (likes + comments as minimum floor)
   let views: number;
   if (isVideo) {
-    views = videoViews || impressions || reach;
+    views = videoViews || impressions || reach || 0;
   } else {
-    views = impressions || reach;
-    // If insights returned nothing but post has engagement, use engagement sum as minimum floor
-    if (views === 0 && (likes + commentsCount) > 0) {
-      views = likes + commentsCount;
-    }
+    views = impressions || reach || 0;
   }
 
   // For video content: retention = video_views / impressions (what % of people who saw it actually watched)
@@ -1602,7 +1600,7 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
   let url: string | null = `${apiBase}/${igUserId}/media?fields=id,caption,media_type,media_url,thumbnail_url,timestamp,like_count,comments_count,permalink&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
-  while (url && totalImported < 500) {
+  while (url && totalImported < 100000) {
     const res = await fetchWithTimeout(url, {}, 30000);
     const data = await res.json();
 
@@ -1620,6 +1618,11 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
           status: "published",
           published_at: post.timestamp,
           source: "api",
+          caption_overrides: {
+            caption: post.caption || "",
+            permalink: post.permalink || "",
+            thumbnail_url: post.thumbnail_url || post.media_url || "",
+          },
         }).select().single();
 
         if (!contentPost) continue;
@@ -1635,36 +1638,45 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
           completed_at: post.timestamp,
         });
 
-        // Fetch insights for this post
+        // Fetch insights for this post (use same apiBase as media endpoint)
         let insights: Record<string, number> = {};
         try {
+          // Use new Instagram API metrics: views replaces impressions/plays
           const insightsRes = await fetchWithTimeout(
-            `https://graph.facebook.com/v19.0/${post.id}/insights?metric=impressions,reach,engagement,saved&access_token=${pageToken}`,
+            `${apiBase}/${post.id}/insights?metric=views,reach,saved,total_interactions,shares,likes,comments&access_token=${pageToken}`,
             {}, 10000
           );
           const insightsData = await insightsRes.json();
-          const metrics = insightsData.data || [];
-          const getMetric = (name: string) => metrics.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
-          insights = {
-            reach: getMetric("reach"),
-            impressions: getMetric("impressions"),
-            engagement_rate: getMetric("engagement"),
-            saves: getMetric("saved"),
-          };
+          if (!insightsData.error) {
+            const metricsList = insightsData.data || [];
+            const getMetric = (name: string) => metricsList.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+            insights = {
+              views: getMetric("views"),
+              reach: getMetric("reach"),
+              saves: getMetric("saved"),
+              total_interactions: getMetric("total_interactions"),
+              shares: getMetric("shares"),
+              ig_likes: getMetric("likes"),
+              ig_comments: getMetric("comments"),
+            };
+          }
         } catch {
-          // Insights may not be available for old posts
+          // Insights may not be available for old posts or without permissions
         }
 
-        // Save analytics
+        const likes = post.like_count || 0;
+        const commentsCount = post.comments_count || 0;
+
+        // Save analytics — use real insights data
         const igAnalytics = {
-          views: insights.impressions || 0,
-          likes: post.like_count || 0,
-          comments: post.comments_count || 0,
-          shares: 0,
+          views: insights.views || 0,
+          likes: insights.ig_likes || likes,
+          comments: insights.ig_comments || commentsCount,
+          shares: insights.shares || 0,
           saves: insights.saves || 0,
           reach: insights.reach || 0,
-          impressions: insights.impressions || 0,
-          engagement_rate: insights.engagement_rate || 0,
+          impressions: insights.views || 0,
+          engagement_rate: insights.total_interactions || 0,
         };
 
         await db().from("post_analytics").insert({
@@ -1817,7 +1829,7 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
     if (totalImported % 50 === 0 && totalImported > 0) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-  } while (pageToken && totalImported < 500);
+  } while (pageToken && totalImported < 100000);
 
   console.log(`[historical] YouTube import complete: ${totalImported} videos`);
   return totalImported;
@@ -1834,7 +1846,7 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
   let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,type,full_picture,permalink_url&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
-  while (url && totalImported < 500) {
+  while (url && totalImported < 100000) {
     const res = await fetchWithTimeout(url, {}, 30000);
     const data = await res.json();
 
@@ -1922,7 +1934,7 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
   let totalImported = 0;
   let hasMore = true;
 
-  while (hasMore && totalImported < 500) {
+  while (hasMore && totalImported < 100000) {
     // LinkedIn Posts API — fetch user's own posts
     const res = await fetchWithTimeout(
       `https://api.linkedin.com/rest/posts?author=${authorUrn}&q=author&count=${count}&start=${start}&sortBy=LAST_MODIFIED`,
@@ -2057,7 +2069,7 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
   let totalImported = 0;
   let hasMore = true;
 
-  while (hasMore && totalImported < 500) {
+  while (hasMore && totalImported < 100000) {
     const res = await fetchWithTimeout(
       "https://open.tiktokapis.com/v2/video/list/?fields=id,title,create_time,share_url,duration,like_count,comment_count,share_count,view_count",
       {
@@ -2198,7 +2210,7 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
     if (totalImported % 100 === 0 && totalImported > 0) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-  } while (paginationToken && totalImported < 500);
+  } while (paginationToken && totalImported < 100000);
 
   console.log(`[historical] Twitter import complete: ${totalImported} tweets`);
   return totalImported;
@@ -3619,7 +3631,7 @@ async function syncYouTubeComments(account: any, brandId: string, orgId: string)
         }
 
         pageToken = commentsRes.data.nextPageToken || undefined;
-      } while (pageToken && synced < 500);
+      } while (pageToken && synced < 100000);
     } catch (e: any) {
       console.error(`[comment-sync] YT comment fetch error for video ${videoId}:`, e.message);
     }
@@ -3800,7 +3812,7 @@ async function syncTikTokComments(account: any, brandId: string) {
       let cursor = 0;
       let hasMore = true;
 
-      while (hasMore && synced < 500) {
+      while (hasMore && synced < 100000) {
         const commentsRes = await fetchWithTimeout(
           `https://open.tiktokapis.com/v2/comment/list/`,
           {

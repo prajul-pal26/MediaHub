@@ -251,10 +251,13 @@ export async function GET(
 
     // ─── Facebook ───
     else if (platform === "facebook") {
+      console.log("[social-callback] Facebook: exchanging code for token...");
+      console.log("[social-callback] Facebook redirect_uri:", redirectUri);
       const tokenRes = await fetch(
         `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${clientSecret}&code=${code}`
       );
       const tokenData = await tokenRes.json();
+      console.log("[social-callback] Facebook token response:", tokenData.error ? JSON.stringify(tokenData.error) : "OK (token received)");
 
       if (tokenData.error) {
         console.error("[social-callback] Facebook token error:", tokenData);
@@ -266,11 +269,13 @@ export async function GET(
       accessToken = tokenData.access_token;
 
       // Get ALL pages
+      console.log("[social-callback] Facebook: fetching pages...");
       const pagesRes = await fetch(
         `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
       );
       const pagesData = await pagesRes.json();
       const allPages = pagesData.data || [];
+      console.log(`[social-callback] Facebook: ${allPages.length} pages found`, allPages.map((p: any) => p.name));
 
       if (allPages.length === 0) {
         return NextResponse.redirect(

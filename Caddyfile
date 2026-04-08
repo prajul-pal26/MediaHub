@@ -1,0 +1,8 @@
+# MediaHub — HTTPS reverse proxy
+# Caddy auto-generates a self-signed cert with `tls internal`.
+# Browser will show a one-time warning — click through to accept.
+
+https://localhost:3443 {
+	reverse_proxy app:3000
+	tls internal
+}

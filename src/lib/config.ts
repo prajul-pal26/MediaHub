@@ -34,8 +34,11 @@ export const config = {
   /** The public-facing app URL (e.g., https://app.mediahub.io or http://localhost:3000) */
   appUrl: env("NEXT_PUBLIC_APP_URL", "https://localhost:3443"),
 
-  /** Supabase PostgreSQL URL */
+  /** Supabase URL — browser-facing (used by NEXT_PUBLIC_ prefix) */
   supabaseUrl: env("NEXT_PUBLIC_SUPABASE_URL", "http://127.0.0.1:54321"),
+
+  /** Supabase URL — server-side (Docker internal or same as public) */
+  supabaseServerUrl: process.env.SUPABASE_URL || env("NEXT_PUBLIC_SUPABASE_URL", "http://127.0.0.1:54321"),
 
   /** Supabase anon key (public, safe for client) */
   supabaseAnonKey: env("NEXT_PUBLIC_SUPABASE_ANON_KEY", ""),

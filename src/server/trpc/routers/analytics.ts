@@ -759,8 +759,9 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
           accounts = accs || [];
         }
 
-        // Get media group title if exists
+        // Get title: from media group, caption_overrides, or platform_specific
         let title = "Imported post";
+        let permalink = "";
         if (post.group_id) {
           const { data: group } = await db
             .from("media_groups")
@@ -768,6 +769,17 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
             .eq("id", post.group_id)
             .maybeSingle();
           if (group) title = group.title || group.caption?.slice(0, 60) || "Untitled";
+        }
+        // Use caption from caption_overrides (stored during import)
+        const overrides = post.caption_overrides || {};
+        if (title === "Imported post" && overrides.caption) {
+          title = overrides.caption.slice(0, 80);
+        }
+        // Get permalink from caption_overrides or platform_specific in analytics
+        permalink = overrides.permalink || "";
+        if (!permalink && analytics?.length > 0) {
+          const ps = analytics[0].platform_specific;
+          if (ps?.permalink) permalink = ps.permalink;
         }
 
         // Aggregate analytics
@@ -799,6 +811,7 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
         results.push({
           id: post.id,
           title,
+          permalink,
           source: post.source,
           published_at: post.published_at,
           platform: accounts[0]?.platform || "unknown",
@@ -956,40 +969,25 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       const days = input.period === "7d" ? 7 : input.period === "30d" ? 30 : 90;
       const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
-      // Get all published post IDs for this brand
-      const { data: brandPosts } = await db
-        .from("content_posts")
-        .select("id")
-        .eq("brand_id", input.brandId)
-        .eq("status", "published");
-
-      const postIds = (brandPosts || []).map((p: any) => p.id);
-      if (postIds.length === 0) return { daily: [], platformComparison: [], topPosts: [] };
-
-      // Fetch history snapshots for this period
-      const { data: history } = await db
-        .from("post_analytics_history")
-        .select("post_id, social_account_id, views, likes, comments, shares, saves, reach, impressions, engagement_rate, snapshot_at")
-        .in("post_id", postIds)
-        .gte("snapshot_at", since)
-        .order("snapshot_at", { ascending: true });
+      // Use RPC to get history with JOINs (avoids 414 URI Too Long)
+      const { data: history } = await db.rpc("get_brand_analytics_history", {
+        p_brand_id: input.brandId,
+        p_since: since,
+      });
 
       if (!history || history.length === 0) {
-        // Fall back to current post_analytics for platform comparison
-        const { data: currentAnalytics } = await db
-          .from("post_analytics")
-          .select("post_id, social_account_id, views, likes, comments, shares, impressions, engagement_rate")
-          .in("post_id", postIds);
-
-        // Build platform comparison from current data
-        const accountPlatforms = await resolveAccountPlatforms(db, currentAnalytics || []);
-        const platComp = buildPlatformComparison(currentAnalytics || [], accountPlatforms);
-
+        // Fall back to current analytics via RPC
+        const { data: currentAnalytics } = await db.rpc("get_brand_analytics", { p_brand_id: input.brandId });
+        const rows = (currentAnalytics || []) as any[];
+        const accountPlatforms: Record<string, string> = {};
+        for (const r of rows) accountPlatforms[r.social_account_id] = r.platform || "unknown";
+        const platComp = buildPlatformComparison(rows, accountPlatforms);
         return { daily: [], platformComparison: platComp, topPosts: [] };
       }
 
-      // Resolve platform for each social_account_id
-      const accountPlatforms = await resolveAccountPlatforms(db, history);
+      // Platform already resolved by RPC — build lookup map
+      const accountPlatforms: Record<string, string> = {};
+      for (const h of history) accountPlatforms[h.social_account_id] = h.platform || "unknown";
 
       // 1. Daily aggregate time series (all platforms combined + per platform)
       const dailyMap: Record<string, Record<string, { views: number; likes: number; comments: number; shares: number; impressions: number; count: number }>> = {};
@@ -1107,51 +1105,14 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
-      // Query analytics through content_posts (brand-scoped, survives social account deletion)
-      const { data: brandPosts } = await db
-        .from("content_posts")
-        .select("id")
-        .eq("brand_id", input.brandId)
-        .eq("status", "published");
+      // Use RPC function to do the JOIN server-side (avoids 414 URI Too Long)
+      const { data: all } = await db.rpc("get_brand_analytics", { p_brand_id: input.brandId });
+      const rows = (all || []) as any[];
 
-      const brandPostIds = (brandPosts || []).map((p: any) => p.id);
-      let all: any[] = [];
-
-      if (brandPostIds.length > 0) {
-        const { data: analytics } = await db
-          .from("post_analytics")
-          .select("post_id, views, likes, comments, shares, saves, reach, impressions, clicks, retention_rate, watch_time_seconds, social_account_id")
-          .in("post_id", brandPostIds);
-        all = (analytics || []) as any[];
-      }
-
-      // Determine platform per analytics row from publish_jobs
+      // Group by platform
       const platformMap: Record<string, any[]> = {};
-      for (const a of all) {
-        let platform = "unknown";
-        if (a.social_account_id) {
-          // Try to get platform from social_accounts (may be deleted)
-          const { data: acc } = await db
-            .from("social_accounts")
-            .select("platform")
-            .eq("id", a.social_account_id)
-            .maybeSingle();
-          if (acc) platform = acc.platform;
-        }
-        if (platform === "unknown" && a.post_id) {
-          // Fallback: infer platform from publish_jobs action
-          const { data: job } = await db
-            .from("publish_jobs")
-            .select("action")
-            .eq("post_id", a.post_id)
-            .limit(1)
-            .maybeSingle();
-          if (job?.action) {
-            if (job.action.startsWith("ig_")) platform = "instagram";
-            else if (job.action.startsWith("yt_")) platform = "youtube";
-            else if (job.action.startsWith("li_")) platform = "linkedin";
-          }
-        }
+      for (const a of rows) {
+        const platform = a.platform || "unknown";
         if (!platformMap[platform]) platformMap[platform] = [];
         platformMap[platform].push(a);
       }

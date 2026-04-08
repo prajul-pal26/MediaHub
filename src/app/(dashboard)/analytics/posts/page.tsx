@@ -346,6 +346,7 @@ export default function PostAnalyticsPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Post</TableHead>
+                      <TableHead>Link</TableHead>
                       <TableHead>Type</TableHead>
                       <TableHead>Platform</TableHead>
                       <TableHead>Source</TableHead>
@@ -367,14 +368,29 @@ export default function PostAnalyticsPage() {
                         className="cursor-pointer hover:bg-accent/50"
                         onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)}
                       >
-                        <TableCell className="max-w-[180px]">
+                        <TableCell className="max-w-[250px]">
                           <div className="flex items-center gap-1">
-                            <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform ${expandedPostId === post.id ? "rotate-180" : ""}`} />
-                            <div>
-                              <p className="text-sm font-medium truncate">{post.title}</p>
+                            <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform flex-shrink-0 ${expandedPostId === post.id ? "rotate-180" : ""}`} />
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium truncate" title={post.title}>{post.title}</p>
                               <p className="text-xs text-muted-foreground">@{post.account_name}</p>
                             </div>
                           </div>
+                        </TableCell>
+                        <TableCell>
+                          {post.permalink ? (
+                            <a
+                              href={post.permalink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              View
+                            </a>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           <span className="text-xs flex items-center gap-1">

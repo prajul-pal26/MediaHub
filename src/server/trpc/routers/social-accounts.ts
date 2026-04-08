@@ -105,7 +105,7 @@ export const socialAccountsRouter = router({
 
       switch (input.platform) {
         case "instagram":
-          url = `https://www.instagram.com/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=instagram_business_basic,instagram_business_content_publish,instagram_business_manage_comments,instagram_business_manage_messages&response_type=code&state=${encodeURIComponent(state)}`;
+          url = `https://www.instagram.com/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=instagram_business_basic,instagram_business_content_publish,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_manage_insights&response_type=code&state=${encodeURIComponent(state)}`;
           break;
         case "youtube":
           url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly")}&response_type=code&access_type=offline&prompt=consent&state=${encodeURIComponent(state)}`;
@@ -277,7 +277,9 @@ export const socialAccountsRouter = router({
         await db.from("comment_sentiments").delete().in("post_id", postIds);
       }
 
-      // 5. Delete post analytics for this account
+      // 5. Delete post analytics + history for this account
+      await db.from("post_analytics_history").delete()
+        .eq("social_account_id", input.accountId);
       await db.from("post_analytics").delete()
         .eq("social_account_id", input.accountId);
 
@@ -292,6 +294,7 @@ export const socialAccountsRouter = router({
             .select("id", { count: "exact", head: true })
             .eq("post_id", pid);
           if (count === 0) {
+            await db.from("post_analytics_history").delete().eq("post_id", pid);
             await db.from("post_analytics").delete().eq("post_id", pid);
             await db.from("comment_sentiments").delete().eq("post_id", pid);
             await db.from("content_posts").delete().eq("id", pid);

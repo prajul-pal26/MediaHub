@@ -46,3 +46,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 prod-ca-2021.crt
+
+# SSL certificates (generated locally by mkcert)
+*.pem

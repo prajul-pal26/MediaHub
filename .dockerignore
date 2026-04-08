@@ -6,3 +6,7 @@ node_modules
 .env.production
 supabase-db
 redis-data
+Caddyfile
+CLAUDE.md
+AGENTS.md
+working_pipeline.md
