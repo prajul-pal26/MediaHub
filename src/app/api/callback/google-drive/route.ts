@@ -7,20 +7,21 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const stateParam = searchParams.get("state");
   const error = searchParams.get("error");
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || request.url;
 
   console.log("[google-drive callback] code:", code ? "yes" : "no", "state:", stateParam ? "yes" : "no", "error:", error);
 
   if (error) {
     console.log("[google-drive callback] OAuth error:", error);
     return NextResponse.redirect(
-      new URL(`/accounts?drive_error=${encodeURIComponent(error)}`, request.url)
+      new URL(`/accounts?drive_error=${encodeURIComponent(error)}`, baseUrl)
     );
   }
 
   if (!code || !stateParam) {
     console.log("[google-drive callback] Missing code or state");
     return NextResponse.redirect(
-      new URL("/accounts?drive_error=missing_params", request.url)
+      new URL("/accounts?drive_error=missing_params", baseUrl)
     );
   }
 
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
   } catch {
     console.log("[google-drive callback] Invalid state JSON");
     return NextResponse.redirect(
-      new URL("/accounts?drive_error=invalid_state", request.url)
+      new URL("/accounts?drive_error=invalid_state", baseUrl)
     );
   }
 
@@ -54,14 +55,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(
         new URL(
           `/brands/new?step=2&brandId=${state.brandId}&drive_connected=true`,
-          request.url
+          baseUrl
         )
       );
     }
 
     // Default: redirect to accounts page
     return NextResponse.redirect(
-      new URL(`/accounts?drive_connected=true&brand=${state.brandId}`, request.url)
+      new URL(`/accounts?drive_connected=true&brand=${state.brandId}`, baseUrl)
     );
   } catch (e: any) {
     console.error("[google-drive callback] Error:", e.message);
@@ -70,13 +71,13 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(
         new URL(
           `/brands/new?step=2&brandId=${state.brandId}&drive_error=${encodeURIComponent(e.message)}`,
-          request.url
+          baseUrl
         )
       );
     }
 
     return NextResponse.redirect(
-      new URL(`/accounts?drive_error=${encodeURIComponent(e.message)}`, request.url)
+      new URL(`/accounts?drive_error=${encodeURIComponent(e.message)}`, baseUrl)
     );
   }
 }

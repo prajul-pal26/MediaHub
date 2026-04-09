@@ -268,18 +268,49 @@ export async function GET(
 
       accessToken = tokenData.access_token;
 
-      // Get ALL pages
+      // Check what permissions were actually granted
+      const permRes = await fetch(
+        `https://graph.facebook.com/v19.0/me/permissions?access_token=${accessToken}`
+      );
+      const permData = await permRes.json();
+      const grantedPerms = (permData.data || [])
+        .filter((p: any) => p.status === "granted")
+        .map((p: any) => p.permission);
+      const declinedPerms = (permData.data || [])
+        .filter((p: any) => p.status === "declined")
+        .map((p: any) => p.permission);
+      console.log("[social-callback] Facebook granted permissions:", grantedPerms);
+      if (declinedPerms.length > 0) {
+        console.log("[social-callback] Facebook declined permissions:", declinedPerms);
+      }
+
+      if (!grantedPerms.includes("pages_show_list")) {
+        console.error("[social-callback] Facebook: pages_show_list not granted");
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent("Page permissions were not granted. Please try again and make sure to allow page access when Facebook asks which pages to share.")}`, baseUrl)
+        );
+      }
+
+      // Get ALL pages the user admins
       console.log("[social-callback] Facebook: fetching pages...");
       const pagesRes = await fetch(
-        `https://graph.facebook.com/v19.0/me/accounts?access_token=${accessToken}`
+        `https://graph.facebook.com/v19.0/me/accounts?fields=id,name,access_token,category,picture&access_token=${accessToken}`
       );
       const pagesData = await pagesRes.json();
+
+      if (pagesData.error) {
+        console.error("[social-callback] Facebook pages error:", JSON.stringify(pagesData.error));
+        return NextResponse.redirect(
+          new URL(`/accounts?error=${encodeURIComponent(pagesData.error?.message || "Failed to fetch Facebook Pages. Check app permissions.")}`, baseUrl)
+        );
+      }
+
       const allPages = pagesData.data || [];
       console.log(`[social-callback] Facebook: ${allPages.length} pages found`, allPages.map((p: any) => p.name));
 
       if (allPages.length === 0) {
         return NextResponse.redirect(
-          new URL("/accounts?error=No+Facebook+Page+found.+Please+ensure+your+account+has+at+least+one+Page.", baseUrl)
+          new URL(`/accounts?error=${encodeURIComponent("No Facebook Pages found. Your Facebook account must be an admin of at least one Page. You can create a Page at facebook.com/pages/create and then try connecting again.")}`, baseUrl)
         );
       }
 

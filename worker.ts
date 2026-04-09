@@ -344,10 +344,10 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
       const containerData = await containerRes.json();
       if (containerData.error) throw new Error(`Instagram container error: ${containerData.error.message}`);
 
-      // For videos, wait for processing
-      if (isVideo) {
-        await waitForIgContainer(containerData.id, pageAccessToken, 120000, igApiBase);
-      }
+      // Wait for container to be ready (videos AND images)
+      // Instagram needs processing time even for images — skipping this causes
+      // "media id not present" errors and duplicate posts on retry
+      await waitForIgContainer(containerData.id, pageAccessToken, isVideo ? 120000 : 30000, igApiBase);
 
       // Publish
       const publishRes = await fetchWithTimeout(
@@ -673,15 +673,33 @@ async function publishToFacebook(asset: any, account: any, action: string, orgId
         console.log(`[facebook] Video story published! ID: ${data.id}`);
         return data.id;
       } else {
-        // Image story
+        // Image story — must upload photo to Facebook first (unpublished), then use its ID
+        console.log(`[facebook] Uploading photo for story...`);
+        const uploadRes = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${pageId}/photos`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: webContentLink,
+              published: false,
+              access_token: pageAccessToken,
+            }),
+          }
+        );
+        const uploadData = await uploadRes.json();
+        if (uploadData.error) throw new Error(`Facebook photo upload error: ${uploadData.error.message}`);
+        const fbPhotoId = uploadData.id;
+        console.log(`[facebook] Photo uploaded (unpublished) ID: ${fbPhotoId}`);
+
+        // Create story with the Facebook photo ID
         const res = await fetchWithTimeout(
           `https://graph.facebook.com/v19.0/${pageId}/photo_stories`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              photo_id: driveFileId,
-              url: webContentLink,
+              photo_id: fbPhotoId,
               access_token: pageAccessToken,
             }),
           }
@@ -1041,6 +1059,17 @@ const publishWorker = new Worker(
     const { publishJobId, assetId, socialAccountId, action, resizeOption, groupId, platformMeta } = job.data;
 
     console.log(`[publish] Processing job ${publishJobId}: ${action}`);
+
+    // Idempotency check: if this job was already completed (e.g., published but marked failed
+    // due to a timeout), don't re-publish — prevents duplicate posts on retry
+    const { data: existingJob } = await db().from("publish_jobs")
+      .select("status, platform_post_id")
+      .eq("id", publishJobId)
+      .single();
+    if (existingJob?.platform_post_id && existingJob.status === "completed") {
+      console.log(`[publish] Job ${publishJobId} already completed with post ${existingJob.platform_post_id} — skipping`);
+      return;
+    }
 
     await db().from("publish_jobs").update({ status: "processing" }).eq("id", publishJobId);
 
@@ -1474,14 +1503,20 @@ async function fetchSnapchatAnalytics(_account: any, _platformPostId: string) {
 
 const analyticsWorker = new Worker(
   "analytics-fetch",
-  async () => {
-    console.log("[analytics] Fetching real analytics for published posts...");
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  async (job) => {
+    // Support both cron (all posts) and manual trigger (specific brand)
+    const brandId = job.data?.brandId as string | undefined;
+    console.log(`[analytics] Fetching analytics${brandId ? ` for brand ${brandId}` : " for all published posts"}...`);
 
-    const { data: posts } = await db().from("content_posts")
+    let query = db().from("content_posts")
       .select("id, brand_id, publish_jobs(id, social_account_id, platform_post_id, action, status)")
-      .eq("status", "published")
-      .gte("published_at", thirtyDaysAgo);
+      .in("status", ["published", "partial_published"]);
+
+    if (brandId) {
+      query = query.eq("brand_id", brandId);
+    }
+
+    const { data: posts } = await query;
 
     let fetched = 0;
     let errors = 0;

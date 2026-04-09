@@ -1,11 +1,12 @@
 "use client";
 
-import { Upload, HardDrive, AlertCircle } from "lucide-react";
+import { Upload, HardDrive, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
 import { useRouter } from "next/navigation";
 import { UploadForm } from "@/components/media/UploadForm";
+import { toast } from "sonner";
 
 export default function UploadPage() {
   const { activeBrandId, loading } = useBrand();
@@ -15,6 +16,11 @@ export default function UploadPage() {
     { brandId: activeBrandId! },
     { enabled: !!activeBrandId }
   );
+
+  const connectDriveMutation = trpc.drive.connect.useMutation({
+    onSuccess: (data) => { window.location.href = data.url; },
+    onError: (error) => toast.error(error.message),
+  });
 
   if (loading) {
     return (
@@ -40,8 +46,8 @@ export default function UploadPage() {
             <p className="font-medium">Google Drive not connected</p>
             <p className="text-sm text-yellow-700">Connect Google Drive before uploading media.</p>
           </div>
-          <Button size="sm" variant="outline" className="shrink-0 border-yellow-300 text-yellow-800 hover:bg-yellow-100" onClick={() => router.push("/accounts")}>
-            <HardDrive className="h-4 w-4 mr-1" />
+          <Button size="sm" variant="outline" className="shrink-0 border-yellow-300 text-yellow-800 hover:bg-yellow-100" onClick={() => connectDriveMutation.mutate({ brandId: activeBrandId! })} disabled={connectDriveMutation.isPending}>
+            {connectDriveMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <HardDrive className="h-4 w-4 mr-1" />}
             Connect Drive
           </Button>
         </div>

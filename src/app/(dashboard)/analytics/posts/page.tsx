@@ -13,7 +13,7 @@ import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
 import {
   BarChart3, Eye, Heart, MessageSquare, Share2, Users, Loader2,
-  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, Clock, ChevronDown,
+  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, Clock, ChevronDown, RefreshCw,
 } from "lucide-react";
 
 const platformColors: Record<string, string> = {
@@ -196,6 +196,17 @@ export default function PostAnalyticsPage() {
     onError: (e: any) => toast.error(e.message),
   });
 
+  const refreshMutation = trpc.analytics.refreshAnalytics.useMutation({
+    onSuccess: () => {
+      toast.success("Analytics refresh started. Data will update in a few seconds.");
+      setTimeout(() => {
+        utils.analytics.getPostAnalytics.invalidate();
+        utils.analytics.getSummary.invalidate();
+      }, 8000);
+    },
+    onError: (e: any) => toast.error(e.message),
+  });
+
   const { data: summary, isLoading: summaryLoading } =
     trpc.analytics.getSummary.useQuery(
       { brandId: activeBrandId! },
@@ -247,11 +258,22 @@ export default function PostAnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Post Analytics</h1>
-        <p className="text-muted-foreground">
-          Performance metrics across all platforms
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Post Analytics</h1>
+          <p className="text-muted-foreground">
+            Performance metrics across all platforms
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
+          disabled={refreshMutation.isPending || !activeBrandId}
+        >
+          {refreshMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+          Refresh
+        </Button>
       </div>
 
       {/* Summary Cards with platform breakdown */}

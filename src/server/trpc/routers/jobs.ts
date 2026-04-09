@@ -53,6 +53,11 @@ export const jobsRouter = router({
       if (!job) throw new TRPCError({ code: "NOT_FOUND" });
       assertBrandAccess(profile, job.content_posts.brand_id);
 
+      // Prevent retrying a job that already succeeded
+      if (job.status === "completed" && job.platform_post_id) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This job was already published successfully" });
+      }
+
       // Reset status and re-queue
       await db
         .from("publish_jobs")

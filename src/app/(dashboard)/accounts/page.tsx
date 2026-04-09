@@ -60,8 +60,14 @@ export default function AccountsPage() {
       toast.success(updated === "true" ? `${label} account updated` : `${label} connected`);
     }
 
+    // OAuth error feedback
+    const oauthError = searchParams.get("error");
+    if (oauthError) {
+      toast.error(decodeURIComponent(oauthError));
+    }
+
     // Clean up URL
-    if (pendingId || driveConnected || driveError || connected) {
+    if (pendingId || driveConnected || driveError || connected || oauthError) {
       router.replace("/accounts", { scroll: false });
     }
   }, [searchParams, router]);
@@ -147,16 +153,28 @@ export default function AccountsPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {!driveStatus?.connected ? (
+          {!driveStatus?.connected || !driveStatus?.isActive ? (
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div className="flex items-center gap-3">
-                <XCircle className="h-5 w-5 text-muted-foreground" />
-                <span className="text-sm">Not connected</span>
+                {driveStatus?.connected && !driveStatus.isActive ? (
+                  <>
+                    <AlertCircle className="h-5 w-5 text-yellow-500" />
+                    <div>
+                      <p className="text-sm font-medium">{driveStatus.email}</p>
+                      <p className="text-xs text-muted-foreground">Inactive — reconnect required</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="h-5 w-5 text-muted-foreground" />
+                    <span className="text-sm">Not connected</span>
+                  </>
+                )}
               </div>
               {canManageDrive && activeBrandId && (
                 <Button size="sm" onClick={() => connectDriveMutation.mutate({ brandId: activeBrandId })} disabled={connectDriveMutation.isPending}>
                   {connectDriveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <HardDrive className="h-4 w-4 mr-1" />}
-                  Connect
+                  {driveStatus?.connected ? "Reconnect" : "Connect"}
                 </Button>
               )}
             </div>
@@ -166,9 +184,7 @@ export default function AccountsPage() {
                 <CheckCircle2 className="h-5 w-5 text-green-500" />
                 <div>
                   <p className="text-sm font-medium">{driveStatus.email}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {driveStatus.isActive ? "Connected" : "Inactive — reconnect required"}
-                  </p>
+                  <p className="text-xs text-muted-foreground">Connected</p>
                 </div>
               </div>
               {canManageDrive && activeBrandId && (

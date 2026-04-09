@@ -9,8 +9,9 @@ import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
 import {
   BarChart3, Brain, Heart, Users, Eye, MessageSquare,
-  Share2, TrendingUp, MousePointer, Clock, Loader2, ArrowUpRight, ArrowDownRight,
+  Share2, TrendingUp, MousePointer, Clock, Loader2, ArrowUpRight, ArrowDownRight, RefreshCw,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell,
@@ -32,15 +33,24 @@ export default function AnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
   const [period, setPeriod] = useState<Period>("30d");
 
-  const { data: summary, isLoading: summaryLoading } = trpc.analytics.getSummary.useQuery(
+  const { data: summary, isLoading: summaryLoading, refetch: refetchSummary } = trpc.analytics.getSummary.useQuery(
     { brandId: activeBrandId! },
     { enabled: !!activeBrandId }
   );
 
-  const { data: timeSeries, isLoading: tsLoading } = trpc.analytics.getAnalyticsTimeSeries.useQuery(
+  const { data: timeSeries, isLoading: tsLoading, refetch: refetchTimeSeries } = trpc.analytics.getAnalyticsTimeSeries.useQuery(
     { brandId: activeBrandId!, period },
     { enabled: !!activeBrandId }
   );
+
+  const refreshMutation = trpc.analytics.refreshAnalytics.useMutation({
+    onSuccess: () => {
+      toast.success("Analytics refresh started. Data will update in a few seconds.");
+      // Refetch after a delay to allow the worker to process
+      setTimeout(() => { refetchSummary(); refetchTimeSeries(); }, 8000);
+    },
+    onError: (error) => toast.error(error.message),
+  });
 
   if (loading) {
     return (
@@ -136,12 +146,23 @@ export default function AnalyticsPage() {
           <h1 className="text-2xl font-bold">Analytics Overview</h1>
           <p className="text-muted-foreground">Performance across all platforms</p>
         </div>
-        <div className="flex gap-1">
-          {(["7d", "30d", "90d"] as Period[]).map((p) => (
-            <Button key={p} variant={period === p ? "default" : "outline"} size="sm" onClick={() => setPeriod(p)}>
-              {p}
-            </Button>
-          ))}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
+            disabled={refreshMutation.isPending || !activeBrandId}
+          >
+            {refreshMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+            Refresh
+          </Button>
+          <div className="flex gap-1">
+            {(["7d", "30d", "90d"] as Period[]).map((p) => (
+              <Button key={p} variant={period === p ? "default" : "outline"} size="sm" onClick={() => setPeriod(p)}>
+                {p}
+              </Button>
+            ))}
+          </div>
         </div>
       </div>
 

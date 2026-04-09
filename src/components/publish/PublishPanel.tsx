@@ -424,8 +424,8 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
             const key = `${job.action}::${job.accountId}`;
             const custom = jobContents[key];
             const showTitle = job.action.startsWith("yt_") || job.action === "li_article";
-            const showDescription = job.action.startsWith("yt_") || job.action === "li_article" || job.action === "li_post";
-            const isStory = job.action === "ig_story";
+            const showDescription = job.action.startsWith("yt_") || job.action === "li_article";
+            const isStory = job.action === "ig_story" || job.action === "fb_story" || job.action === "sc_story";
 
             return (
               <Card key={key}>
@@ -455,7 +455,7 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
                     </div>
                   )}
 
-                  {!isStory && (
+                  {!isStory && job.action !== "li_article" && (
                     <div className="space-y-1.5">
                       <Label className="text-sm">Caption</Label>
                       <Textarea

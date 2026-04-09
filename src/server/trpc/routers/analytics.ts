@@ -1078,6 +1078,25 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       return { daily, platformComparison: platComp, topPosts };
     }),
 
+  // ━━━ Manual Analytics Refresh ━━━
+
+  refreshAnalytics: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { profile } = ctx;
+      assertBrandAccess(profile, input.brandId);
+
+      const { Queue } = await import("bullmq");
+      const { getQueueConnection } = await import("@/server/queue/connection");
+      const analyticsQueue = new Queue("analytics-fetch", { connection: getQueueConnection() });
+
+      await analyticsQueue.add("manual-refresh", { brandId: input.brandId }, {
+        jobId: `analytics-manual-${input.brandId}-${Date.now()}`,
+      });
+
+      return { queued: true, message: "Analytics refresh started. Data will update shortly." };
+    }),
+
   // ━━━ Trigger Trend Forecast (manual refresh) ━━━
 
   refreshTrendForecast: protectedProcedure
