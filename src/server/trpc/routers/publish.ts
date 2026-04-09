@@ -146,7 +146,8 @@ export const publishRouter = router({
           group.tags || [],
           group.title,
           group.description,
-          input.captionOverrides
+          input.captionOverrides,
+          job.socialAccountId
         );
 
         const { data: publishJob, error: jobError } = await db

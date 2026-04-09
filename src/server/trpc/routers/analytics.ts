@@ -681,25 +681,58 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
     .mutation(async ({ ctx, input }) => {
       const { db, profile } = ctx;
 
-      // Get the post and verify access
-      const { data: post } = await db
-        .from("content_posts")
-        .select("id, brand_id, status")
+      // postId may be a publish_job id (from per-job analytics view) or a content_post id
+      const { data: job } = await db
+        .from("publish_jobs")
+        .select("id, post_id, content_posts(brand_id)")
         .eq("id", input.postId)
-        .single();
+        .maybeSingle();
 
-      if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
-      assertBrandAccess(profile, post.brand_id);
+      let brandId: string;
+      let contentPostId: string;
+      let deleteJobOnly = false;
 
-      // Only brand_owner, agency_admin, super_admin can delete
+      if (job) {
+        // It's a publish_job id — delete just this job + its analytics
+        brandId = (job.content_posts as any).brand_id;
+        contentPostId = job.post_id;
+        deleteJobOnly = true;
+      } else {
+        // It's a content_post id — delete the entire post
+        const { data: post } = await db
+          .from("content_posts")
+          .select("id, brand_id")
+          .eq("id", input.postId)
+          .single();
+        if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
+        brandId = post.brand_id;
+        contentPostId = post.id;
+      }
+
+      assertBrandAccess(profile, brandId);
+
       if (!["super_admin", "agency_admin", "brand_owner"].includes(profile.role)) {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only brand owners and admins can delete published content" });
       }
 
-      // Delete analytics first, then jobs, then post
-      await db.from("post_analytics").delete().eq("post_id", input.postId);
-      await db.from("publish_jobs").delete().eq("post_id", input.postId);
-      await db.from("content_posts").delete().eq("id", input.postId);
+      if (deleteJobOnly) {
+        // Delete just this job's analytics and the job itself
+        await db.from("post_analytics").delete().eq("publish_job_id", input.postId);
+        await db.from("post_analytics_history").delete().eq("publish_job_id", input.postId);
+        await db.from("publish_jobs").delete().eq("id", input.postId);
+
+        // If no more jobs remain for this post, delete the content_post too
+        const { data: remaining } = await db.from("publish_jobs").select("id").eq("post_id", contentPostId);
+        if (!remaining || remaining.length === 0) {
+          await db.from("post_analytics").delete().eq("post_id", contentPostId);
+          await db.from("content_posts").delete().eq("id", contentPostId);
+        }
+      } else {
+        // Delete entire post with all jobs and analytics
+        await db.from("post_analytics").delete().eq("post_id", contentPostId);
+        await db.from("publish_jobs").delete().eq("post_id", contentPostId);
+        await db.from("content_posts").delete().eq("id", contentPostId);
+      }
 
       return { success: true };
     }),
@@ -721,115 +754,129 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
 
       const offset = (input.page - 1) * input.limit;
 
-      // Get published content_posts with their analytics (include partial_published too)
-      let query = db
-        .from("content_posts")
-        .select("id, group_id, status, published_at, source, caption_overrides", { count: "exact" })
-        .eq("brand_id", input.brandId)
-        .in("status", ["published", "partial_published"])
-        .order("published_at", { ascending: false, nullsFirst: false })
+      // Query publish_jobs directly (one row per job = one row in analytics)
+      // Exclude stories — ephemeral content with no lasting analytics
+      let jobQuery = db
+        .from("publish_jobs")
+        .select(`
+          id, post_id, action, platform_post_id, social_account_id, status, completed_at,
+          content_posts!inner(id, group_id, status, published_at, source, caption_overrides, brand_id)
+        `, { count: "exact" })
+        .eq("content_posts.brand_id", input.brandId)
+        .in("content_posts.status", ["published", "partial_published"])
+        .eq("status", "completed")
+        .not("action", "like", "%_story")
+        .order("completed_at", { ascending: false, nullsFirst: false })
         .range(offset, offset + input.limit - 1);
 
-      const { data: posts, error, count } = await query;
+      if (input.platform) {
+        jobQuery = jobQuery.ilike("action", `${input.platform}%`);
+      }
+
+      const { data: jobs, error, count } = await jobQuery;
       if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
-      // For each post, get publish_jobs + analytics
-      const results = [];
-      for (const post of posts || []) {
-        const { data: jobs } = await db
-          .from("publish_jobs")
-          .select("id, action, platform_post_id, social_account_id, status")
-          .eq("post_id", post.id)
-          .eq("status", "completed");
+      const contentTypeMap: Record<string, string> = {
+        ig_post: "Image Post", ig_reel: "Reel", ig_story: "Story", ig_carousel: "Carousel",
+        yt_video: "Video", yt_short: "Short",
+        li_post: "Post", li_article: "Article",
+        fb_post: "Post", fb_reel: "Reel", fb_story: "Story",
+        tt_video: "Video", tw_post: "Post", sc_story: "Story",
+      };
 
-        // Get analytics for this post
-        const { data: analytics } = await db
+      // Batch-fetch all needed social accounts
+      const accountIds = [...new Set((jobs || []).map((j: any) => j.social_account_id).filter(Boolean))];
+      let accountMap: Record<string, any> = {};
+      if (accountIds.length > 0) {
+        const { data: accs } = await db
+          .from("social_accounts")
+          .select("id, platform, platform_username")
+          .in("id", accountIds);
+        for (const a of accs || []) accountMap[a.id] = a;
+      }
+
+      // Batch-fetch all needed media groups
+      const groupIds = [...new Set((jobs || []).map((j: any) => j.content_posts?.group_id).filter(Boolean))];
+      let groupMap: Record<string, any> = {};
+      if (groupIds.length > 0) {
+        const { data: groups } = await db
+          .from("media_groups")
+          .select("id, title, caption")
+          .in("id", groupIds);
+        for (const g of groups || []) groupMap[g.id] = g;
+      }
+
+      const results = [];
+      for (const job of jobs || []) {
+        const post = job.content_posts as any;
+        const account = accountMap[job.social_account_id] || {};
+
+        // Get analytics for this specific publish_job
+        const { data: analyticsRow } = await db
           .from("post_analytics")
           .select("*")
-          .eq("post_id", post.id);
+          .eq("publish_job_id", job.id)
+          .maybeSingle();
 
-        // Get account info
-        const accountIds = (jobs || []).map((j: any) => j.social_account_id).filter(Boolean);
-        let accounts: any[] = [];
-        if (accountIds.length > 0) {
-          const { data: accs } = await db
-            .from("social_accounts")
-            .select("id, platform, platform_username")
-            .in("id", accountIds);
-          accounts = accs || [];
-        }
-
-        // Get title: from media group, caption_overrides, or platform_specific
-        let title = "Imported post";
-        let permalink = "";
-        if (post.group_id) {
-          const { data: group } = await db
-            .from("media_groups")
-            .select("title, caption")
-            .eq("id", post.group_id)
+        // Fallback: try by post_id + social_account_id for legacy rows
+        let a = analyticsRow;
+        if (!a) {
+          const { data: legacyRow } = await db
+            .from("post_analytics")
+            .select("*")
+            .eq("post_id", post.id)
+            .eq("social_account_id", job.social_account_id)
+            .is("publish_job_id", null)
             .maybeSingle();
-          if (group) title = group.title || group.caption?.slice(0, 60) || "Untitled";
+          a = legacyRow;
         }
-        // Use caption from caption_overrides (stored during import)
+
+        // Determine title
+        let title = "Untitled";
+        const group = post.group_id ? groupMap[post.group_id] : null;
+        if (group) {
+          title = group.title || group.caption?.slice(0, 60) || "Untitled";
+        }
         const overrides = post.caption_overrides || {};
-        if (title === "Imported post" && overrides.caption) {
+        if (title === "Untitled" && overrides.caption) {
           title = overrides.caption.slice(0, 80);
         }
-        // Get permalink from caption_overrides or platform_specific in analytics
-        permalink = overrides.permalink || "";
-        if (!permalink && analytics?.length > 0) {
-          const ps = analytics[0].platform_specific;
-          if (ps?.permalink) permalink = ps.permalink;
-        }
+        // Check action-specific caption override for title
+        const actionTitle = overrides[`${job.action}_${job.social_account_id}_title`];
+        if (actionTitle) title = actionTitle;
 
-        // Aggregate analytics
-        const aa = analytics || [];
-        const totalViews = aa.reduce((s: number, a: any) => s + (a.views || 0), 0);
-        const totalLikes = aa.reduce((s: number, a: any) => s + (a.likes || 0), 0);
-        const totalComments = aa.reduce((s: number, a: any) => s + (a.comments || 0), 0);
-        const totalShares = aa.reduce((s: number, a: any) => s + (a.shares || 0), 0);
-        const totalSaves = aa.reduce((s: number, a: any) => s + (a.saves || 0), 0);
-        const totalReach = aa.reduce((s: number, a: any) => s + (a.reach || 0), 0);
-        const totalImpressions = aa.reduce((s: number, a: any) => s + (a.impressions || 0), 0);
-        const totalClicks = aa.reduce((s: number, a: any) => s + (a.clicks || 0), 0);
-        const avgRetention = aa.length > 0 ? Math.round(aa.reduce((s: number, a: any) => s + (a.retention_rate || 0), 0) / aa.length * 100) / 100 : 0;
-        const totalWatchTime = aa.reduce((s: number, a: any) => s + (a.watch_time_seconds || 0), 0);
+        // Permalink
+        let permalink = overrides.permalink || overrides[`${job.action}_${job.social_account_id}_permalink`] || "";
+        if (!permalink && a?.platform_specific?.permalink) permalink = a.platform_specific.permalink;
 
-        // Determine content type from action
-        const action = (jobs || [])[0]?.action || "unknown";
-        const contentTypeMap: Record<string, string> = {
-          ig_post: "Image Post",
-          ig_reel: "Reel",
-          ig_story: "Story",
-          ig_carousel: "Carousel",
-          yt_video: "Video",
-          yt_short: "Short",
-          li_post: "Post",
-          li_article: "Article",
-        };
+        const views = a?.views || 0;
+        const likes = a?.likes || 0;
+        const comments = a?.comments || 0;
+        const shares = a?.shares || 0;
 
         results.push({
-          id: post.id,
+          id: job.id, // Use publish_job id as unique row id
+          post_id: post.id,
           title,
           permalink,
           source: post.source,
-          published_at: post.published_at,
-          platform: accounts[0]?.platform || "unknown",
-          account_name: accounts[0]?.platform_username || "Unknown",
-          action,
-          content_type: contentTypeMap[action] || action,
-          views: totalViews,
-          likes: totalLikes,
-          comments: totalComments,
-          shares: totalShares,
-          saves: totalSaves,
-          reach: totalReach,
-          impressions: totalImpressions,
-          clicks: totalClicks,
-          retention_rate: avgRetention,
-          watch_time_seconds: totalWatchTime,
-          engagement_rate: totalViews > 0
-            ? Math.round(((totalLikes + totalComments + totalShares) / totalViews) * 10000) / 100
+          published_at: post.published_at || job.completed_at,
+          platform: account.platform || "unknown",
+          account_name: account.platform_username || "Unknown",
+          action: job.action,
+          content_type: contentTypeMap[job.action] || job.action,
+          views,
+          likes,
+          comments,
+          shares,
+          saves: a?.saves || 0,
+          reach: a?.reach || 0,
+          impressions: a?.impressions || 0,
+          clicks: a?.clicks || 0,
+          retention_rate: a?.retention_rate || 0,
+          watch_time_seconds: a?.watch_time_seconds || 0,
+          engagement_rate: views > 0
+            ? Math.round(((likes + comments + shares) / views) * 10000) / 100
             : 0,
         });
       }
@@ -902,31 +949,64 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
     .query(async ({ ctx, input }) => {
       const { db, profile } = ctx;
 
-      // Verify access
-      const { data: post } = await db
-        .from("content_posts")
-        .select("brand_id, published_at")
+      // postId is now a publish_job_id — look up the content_post through it
+      const { data: job } = await db
+        .from("publish_jobs")
+        .select("id, post_id, content_posts(brand_id, published_at)")
         .eq("id", input.postId)
         .single();
 
-      if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
-      assertBrandAccess(profile, post.brand_id);
+      // Fallback: try as content_post id (for legacy/imported data)
+      let brandId: string;
+      let publishJobId: string | null = null;
+      let contentPostId: string;
 
-      const { data: history, error } = await db
+      if (job) {
+        const post = job.content_posts as any;
+        brandId = post.brand_id;
+        publishJobId = job.id;
+        contentPostId = job.post_id;
+      } else {
+        const { data: post } = await db
+          .from("content_posts")
+          .select("id, brand_id")
+          .eq("id", input.postId)
+          .single();
+        if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
+        brandId = post.brand_id;
+        contentPostId = post.id;
+      }
+
+      assertBrandAccess(profile, brandId);
+
+      // Get history — prefer by publish_job_id, fallback to post_id
+      let historyQuery = db
         .from("post_analytics_history")
         .select("views, likes, comments, shares, saves, reach, impressions, engagement_rate, retention_rate, snapshot_at")
-        .eq("post_id", input.postId)
         .order("snapshot_at", { ascending: true });
 
+      if (publishJobId) {
+        historyQuery = historyQuery.eq("publish_job_id", publishJobId);
+      } else {
+        historyQuery = historyQuery.eq("post_id", contentPostId);
+      }
+
+      const { data: history, error } = await historyQuery;
       if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
-      // Also get the latest from post_analytics for the current state
-      const { data: latest } = await db
+      // Get latest analytics
+      let latestQuery = db
         .from("post_analytics")
         .select("views, likes, comments, shares, saves, reach, impressions, engagement_rate, retention_rate, fetched_at")
-        .eq("post_id", input.postId)
-        .limit(1)
-        .single();
+        .limit(1);
+
+      if (publishJobId) {
+        latestQuery = latestQuery.eq("publish_job_id", publishJobId);
+      } else {
+        latestQuery = latestQuery.eq("post_id", contentPostId);
+      }
+
+      const { data: latest } = await latestQuery.single();
 
       const snapshots = (history || []).map((h: any) => ({
         ...h,

@@ -76,6 +76,9 @@ echo ""
 echo "[4/4] Building and starting all services..."
 echo ""
 
+# Clear Docker build cache to free memory for the build
+docker builder prune -f > /dev/null 2>&1 || true
+
 docker compose up -d --build
 
 echo ""

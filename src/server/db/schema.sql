@@ -161,6 +161,7 @@ CREATE TABLE post_analytics (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   post_id UUID REFERENCES content_posts(id) ON DELETE CASCADE NOT NULL,
   social_account_id UUID REFERENCES social_accounts(id) ON DELETE SET NULL,
+  publish_job_id UUID REFERENCES publish_jobs(id) ON DELETE CASCADE,
   views INTEGER DEFAULT 0,
   likes INTEGER DEFAULT 0,
   comments INTEGER DEFAULT 0,
@@ -174,9 +175,10 @@ CREATE TABLE post_analytics (
   avg_view_duration_seconds FLOAT DEFAULT 0,
   retention_rate FLOAT DEFAULT 0,
   platform_specific JSONB DEFAULT '{}',
-  fetched_at TIMESTAMPTZ, -- null = placeholder (not yet fetched from platform)
-  CONSTRAINT uq_post_analytics_post_account UNIQUE (post_id, social_account_id)
+  fetched_at TIMESTAMPTZ -- null = placeholder (not yet fetched from platform)
 );
+CREATE UNIQUE INDEX uq_post_analytics_job ON post_analytics (publish_job_id) WHERE publish_job_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_post_analytics_post_account_legacy ON post_analytics (post_id, social_account_id) WHERE publish_job_id IS NULL;
 
 -- ─── Post Analytics History (time-series snapshots for progress charts) ───
 CREATE TABLE post_analytics_history (

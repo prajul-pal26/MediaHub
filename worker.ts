@@ -1124,21 +1124,23 @@ const publishWorker = new Worker(
         platform_post_id: platformPostId,
       }).eq("id", publishJobId);
 
-      // Create initial post_analytics entry (zero metrics — will be populated by analytics-fetch cron/refresh)
+      // Create initial post_analytics entry per publish_job (zero metrics — populated by analytics-fetch cron/refresh)
+      // Skip stories — they expire after 24h and have no lasting analytics
+      const isStory = action.endsWith("_story");
       const { data: postJob } = await db().from("publish_jobs").select("id, post_id").eq("id", publishJobId).single();
-      if (postJob) {
+      if (postJob && !isStory) {
         try {
-          // Check if analytics entry already exists (avoid duplicates)
+          // Check if analytics entry already exists for this specific publish_job
           const { data: existingAnalytics } = await db().from("post_analytics")
             .select("id")
-            .eq("post_id", postJob.post_id)
-            .eq("social_account_id", socialAccountId)
+            .eq("publish_job_id", publishJobId)
             .maybeSingle();
 
           if (!existingAnalytics) {
             await db().from("post_analytics").insert({
               post_id: postJob.post_id,
               social_account_id: socialAccountId,
+              publish_job_id: publishJobId,
               views: 0,
               likes: 0,
               comments: 0,
@@ -1152,7 +1154,7 @@ const publishWorker = new Worker(
               watch_time_seconds: 0,
               fetched_at: null, // null = not yet fetched from platform
             });
-            console.log(`[publish] Created initial analytics entry for post ${postJob.post_id}`);
+            console.log(`[publish] Created initial analytics entry for job ${publishJobId}`);
           }
         } catch (e: any) {
           // Analytics entry creation should never break the publish flow
@@ -1559,6 +1561,8 @@ const analyticsWorker = new Worker(
     for (const post of posts || []) {
       for (const pj of post.publish_jobs || []) {
         if (pj.status !== "completed" || !pj.platform_post_id) continue;
+        // Skip stories — ephemeral content, no lasting analytics
+        if (pj.action.endsWith("_story")) continue;
 
         try {
           // Get the social account
@@ -1590,11 +1594,10 @@ const analyticsWorker = new Worker(
           }
 
           if (analytics) {
-            // Upsert latest snapshot in post_analytics
+            // Upsert latest snapshot in post_analytics (per publish_job)
             const { data: existing } = await db().from("post_analytics")
               .select("id")
-              .eq("post_id", post.id)
-              .eq("social_account_id", pj.social_account_id)
+              .eq("publish_job_id", pj.id)
               .maybeSingle();
 
             if (existing) {
@@ -1603,16 +1606,34 @@ const analyticsWorker = new Worker(
                 fetched_at: new Date().toISOString(),
               }).eq("id", existing.id);
             } else {
-              await db().from("post_analytics").insert({
-                post_id: post.id,
-                social_account_id: pj.social_account_id,
-                ...analytics,
-                fetched_at: new Date().toISOString(),
-              });
+              // Fallback: check by post_id + social_account_id (legacy rows without publish_job_id)
+              const { data: legacyRow } = await db().from("post_analytics")
+                .select("id")
+                .eq("post_id", post.id)
+                .eq("social_account_id", pj.social_account_id)
+                .is("publish_job_id", null)
+                .maybeSingle();
+
+              if (legacyRow) {
+                // Upgrade legacy row: set publish_job_id and update analytics
+                await db().from("post_analytics").update({
+                  publish_job_id: pj.id,
+                  ...analytics,
+                  fetched_at: new Date().toISOString(),
+                }).eq("id", legacyRow.id);
+              } else {
+                await db().from("post_analytics").insert({
+                  post_id: post.id,
+                  social_account_id: pj.social_account_id,
+                  publish_job_id: pj.id,
+                  ...analytics,
+                  fetched_at: new Date().toISOString(),
+                });
+              }
             }
 
             // Append history snapshot for progress tracking
-            await appendAnalyticsHistory(post.id, pj.social_account_id, analytics);
+            await appendAnalyticsHistory(post.id, pj.social_account_id, analytics, pj.id);
 
             fetched++;
           }
@@ -1631,11 +1652,12 @@ const analyticsWorker = new Worker(
 
 // ─── Analytics History Helper ───
 
-async function appendAnalyticsHistory(postId: string, socialAccountId: string, analytics: any) {
+async function appendAnalyticsHistory(postId: string, socialAccountId: string, analytics: any, publishJobId?: string) {
   try {
     await db().from("post_analytics_history").insert({
       post_id: postId,
       social_account_id: socialAccountId,
+      publish_job_id: publishJobId || null,
       views: analytics.views || 0,
       likes: analytics.likes || 0,
       comments: analytics.comments || 0,

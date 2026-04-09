@@ -119,63 +119,72 @@ export function getResizeOptions(needsResize: boolean): ResizeOption[] {
 }
 
 // Platform-aware metadata for publish jobs
+// captionOverrides keys from frontend: `${action}_${accountId}_caption`, `${action}_${accountId}_title`, etc.
 export function getPlatformMetadata(
   action: string,
   caption: string,
   tags: string[],
   title?: string,
   description?: string,
-  captionOverrides?: Record<string, string>
+  captionOverrides?: Record<string, string>,
+  socialAccountId?: string
 ): Record<string, string | string[] | null> {
   const hashTags = tags.map((t) => `#${t.replace(/^#/, "")}`).join(" ");
   const fullCaption = caption ? `${caption}\n\n${hashTags}`.trim() : hashTags;
+
+  // Resolve override for this specific job (action + account)
+  const ov = (field: string): string | undefined => {
+    if (!captionOverrides || !socialAccountId) return undefined;
+    // Try exact key: ig_post_accountId_caption
+    return captionOverrides[`${action}_${socialAccountId}_${field}`];
+  };
 
   switch (action) {
     case "ig_post":
     case "ig_reel":
     case "ig_carousel":
       return {
-        caption: captionOverrides?.instagram || fullCaption,
+        caption: ov("caption") || fullCaption,
         hashtags: hashTags,
       };
     case "ig_story":
       return { caption: null, hashtags: null }; // Stories skip captions
     case "yt_video":
       return {
-        title: captionOverrides?.youtube_title || title || caption?.slice(0, 100) || "Untitled",
-        description: captionOverrides?.youtube_description || description || caption || "",
+        title: ov("title") || title || caption?.slice(0, 100) || "Untitled",
+        description: ov("description") || description || caption || "",
         tags: tags.join(","),
       };
     case "yt_short":
       return {
-        title: captionOverrides?.youtube_title || caption?.slice(0, 100) || "Untitled",
+        title: ov("title") || caption?.slice(0, 100) || "Untitled",
         tags: tags.join(","),
       };
     case "li_post":
-      return { caption: captionOverrides?.linkedin || fullCaption };
+      return { caption: ov("caption") || fullCaption };
     case "li_article":
       return {
-        title: title || caption?.slice(0, 200) || "Untitled",
-        description: description || caption || "",
+        title: ov("title") || title || caption?.slice(0, 200) || "Untitled",
+        description: ov("description") || description || caption || "",
       };
     case "fb_post":
     case "fb_reel":
       return {
-        caption: captionOverrides?.facebook || fullCaption,
+        caption: ov("caption") || fullCaption,
       };
     case "fb_story":
       return { caption: null }; // Stories skip captions
     case "tt_video":
       return {
-        caption: captionOverrides?.tiktok || fullCaption,
+        caption: ov("caption") || fullCaption,
       };
     case "tw_post":
       return {
-        caption: captionOverrides?.twitter || (caption ? `${caption}\n\n${hashTags}`.trim() : hashTags).slice(0, 280),
+        caption: ov("caption") || (caption ? `${caption}\n\n${hashTags}`.trim() : hashTags).slice(0, 280),
       };
     case "sc_story":
       return {
-        caption: captionOverrides?.snapchat || fullCaption,
+        caption: ov("caption") || fullCaption,
       };
     default:
       return { caption: fullCaption };
