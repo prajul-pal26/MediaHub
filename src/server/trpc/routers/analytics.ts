@@ -721,13 +721,13 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
 
       const offset = (input.page - 1) * input.limit;
 
-      // Get published content_posts with their analytics
+      // Get published content_posts with their analytics (include partial_published too)
       let query = db
         .from("content_posts")
         .select("id, group_id, status, published_at, source, caption_overrides", { count: "exact" })
         .eq("brand_id", input.brandId)
-        .eq("status", "published")
-        .order("published_at", { ascending: false })
+        .in("status", ["published", "partial_published"])
+        .order("published_at", { ascending: false, nullsFirst: false })
         .range(offset, offset + input.limit - 1);
 
       const { data: posts, error, count } = await query;

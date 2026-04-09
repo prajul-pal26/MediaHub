@@ -1124,21 +1124,56 @@ const publishWorker = new Worker(
         platform_post_id: platformPostId,
       }).eq("id", publishJobId);
 
+      // Create initial post_analytics entry (zero metrics — will be populated by analytics-fetch cron/refresh)
+      const { data: postJob } = await db().from("publish_jobs").select("id, post_id").eq("id", publishJobId).single();
+      if (postJob) {
+        try {
+          // Check if analytics entry already exists (avoid duplicates)
+          const { data: existingAnalytics } = await db().from("post_analytics")
+            .select("id")
+            .eq("post_id", postJob.post_id)
+            .eq("social_account_id", socialAccountId)
+            .maybeSingle();
+
+          if (!existingAnalytics) {
+            await db().from("post_analytics").insert({
+              post_id: postJob.post_id,
+              social_account_id: socialAccountId,
+              views: 0,
+              likes: 0,
+              comments: 0,
+              shares: 0,
+              saves: 0,
+              clicks: 0,
+              reach: 0,
+              impressions: 0,
+              engagement_rate: 0,
+              retention_rate: 0,
+              watch_time_seconds: 0,
+              fetched_at: null, // null = not yet fetched from platform
+            });
+            console.log(`[publish] Created initial analytics entry for post ${postJob.post_id}`);
+          }
+        } catch (e: any) {
+          // Analytics entry creation should never break the publish flow
+          console.error(`[publish] Failed to create analytics entry:`, e.message);
+        }
+      }
+
       // Check if all sibling jobs for this post are done
-      const { data: postJobs } = await db().from("publish_jobs").select("id, post_id").eq("id", publishJobId).single();
-      if (postJobs) {
-        const { data: allJobs } = await db().from("publish_jobs").select("status").eq("post_id", postJobs.post_id);
+      if (postJob) {
+        const { data: allJobs } = await db().from("publish_jobs").select("status").eq("post_id", postJob.post_id);
         const statuses = (allJobs || []).map((j: any) => j.status);
         const allCompleted = statuses.every((s: string) => s === "completed");
         const hasActiveJobs = statuses.some((s: string) => s === "processing" || s === "queued");
         const hasFailures = statuses.some((s: string) => s === "failed" || s === "dead");
 
         if (allCompleted) {
-          await db().from("content_posts").update({ status: "published", published_at: new Date().toISOString() }).eq("id", postJobs.post_id);
+          await db().from("content_posts").update({ status: "published", published_at: new Date().toISOString() }).eq("id", postJob.post_id);
           await db().from("media_groups").update({ status: "published" }).eq("id", groupId);
         } else if (hasFailures && !hasActiveJobs) {
           // Some jobs failed/dead but none are still running — partial publish
-          await db().from("content_posts").update({ status: "partial_published" }).eq("id", postJobs.post_id);
+          await db().from("content_posts").update({ status: "partial_published" }).eq("id", postJob.post_id);
         }
         // Otherwise, jobs are still in flight — leave post status as "publishing"
       }

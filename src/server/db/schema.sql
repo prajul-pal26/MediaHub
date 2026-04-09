@@ -174,7 +174,8 @@ CREATE TABLE post_analytics (
   avg_view_duration_seconds FLOAT DEFAULT 0,
   retention_rate FLOAT DEFAULT 0,
   platform_specific JSONB DEFAULT '{}',
-  fetched_at TIMESTAMPTZ DEFAULT now()
+  fetched_at TIMESTAMPTZ, -- null = placeholder (not yet fetched from platform)
+  CONSTRAINT uq_post_analytics_post_account UNIQUE (post_id, social_account_id)
 );
 
 -- ─── Post Analytics History (time-series snapshots for progress charts) ───
