@@ -831,19 +831,17 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
           a = legacyRow;
         }
 
-        // Determine title
-        let title = "Untitled";
-        const group = post.group_id ? groupMap[post.group_id] : null;
-        if (group) {
-          title = group.title || group.caption?.slice(0, 60) || "Untitled";
-        }
+        // Determine title — prefer caption over title for display
         const overrides = post.caption_overrides || {};
-        if (title === "Untitled" && overrides.caption) {
-          title = overrides.caption.slice(0, 80);
-        }
-        // Check action-specific caption override for title
-        const actionTitle = overrides[`${job.action}_${job.social_account_id}_title`];
-        if (actionTitle) title = actionTitle;
+        const group = post.group_id ? groupMap[post.group_id] : null;
+
+        // Priority: action-specific caption > media group caption > caption override > media group title > "Untitled"
+        const actionCaption = overrides[`${job.action}_${job.social_account_id}_caption`];
+        let title = actionCaption
+          || group?.caption?.slice(0, 80)
+          || overrides.caption?.slice(0, 80)
+          || group?.title
+          || "Untitled";
 
         // Permalink
         let permalink = overrides.permalink || overrides[`${job.action}_${job.social_account_id}_permalink`] || "";
