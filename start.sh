@@ -2,9 +2,12 @@
 # ==========================================
 #  MediaHub — One-Command Start (Linux/Mac)
 # ==========================================
-#  Usage: bash start.sh           (start or update — smart about what to rebuild)
+#  Usage: bash start.sh           (pull + rebuild everything)
 #         bash start.sh --reset   (wipe everything, fresh start)
 #  Requirements: Docker + Git
+#
+#  Always rebuilds ALL containers on every run so that any change
+#  (code, schema, migrations, config) is picked up automatically.
 
 set -e
 cd "$(dirname "$0")"
@@ -36,31 +39,16 @@ if [ "$1" = "--reset" ]; then
   docker compose down -v 2>/dev/null || true
   docker builder prune -f 2>/dev/null || true
   echo "  Clean slate ready."
-  NEEDS_FULL_START=true
 else
-  # Check if infrastructure is already running
-  INFRA_RUNNING=false
-  if docker compose ps 2>/dev/null | grep -q "mediahub-database.*running"; then
-    INFRA_RUNNING=true
-  fi
-
-  if [ "$INFRA_RUNNING" = true ]; then
-    echo ""
-    echo "[2/4] Infrastructure already running — will only rebuild app + worker"
-    NEEDS_FULL_START=false
-  else
-    echo ""
-    echo "[2/4] Starting fresh..."
-    docker compose down 2>/dev/null || true
-    NEEDS_FULL_START=true
-  fi
+  echo ""
+  echo "[2/4] Stopping existing containers..."
+  docker compose down 2>/dev/null || true
 fi
 
 # ─── Pull latest code ───
 echo ""
 echo "[3/4] Checking for code updates..."
 
-CODE_CHANGED=false
 if command -v git &> /dev/null && [ -d .git ]; then
   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
   git fetch origin "$BRANCH" 2>/dev/null || true
@@ -72,7 +60,6 @@ if command -v git &> /dev/null && [ -d .git ]; then
     if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null; then
       echo "  Pulling latest code..."
       git pull origin "$BRANCH"
-      CODE_CHANGED=true
       echo "  Updated."
     else
       echo "  Updates available, but you have local changes — skipping pull."
@@ -84,18 +71,12 @@ else
   echo "  No git — skipping update check."
 fi
 
-# ─── Build and start ───
+# ─── Build and start ALL services ───
 echo ""
-echo "[4/4] Building and starting services..."
+echo "[4/4] Building and starting all services..."
 echo ""
 
-if [ "$NEEDS_FULL_START" = true ]; then
-  # Full start — all services
-  docker compose up -d --build
-else
-  # Smart restart — only rebuild app + worker + caddy
-  docker compose up -d --build app worker caddy
-fi
+docker compose up -d --build
 
 echo ""
 echo "=========================================="
