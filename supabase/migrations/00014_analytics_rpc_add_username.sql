@@ -3,6 +3,9 @@
 -- So overview cards can show per-account breakdowns
 -- ============================================
 
+-- Must drop first because return type is changing (adding platform_username column)
+DROP FUNCTION IF EXISTS get_brand_analytics(uuid);
+
 CREATE OR REPLACE FUNCTION get_brand_analytics(p_brand_id uuid)
 RETURNS TABLE (
   post_id uuid,
