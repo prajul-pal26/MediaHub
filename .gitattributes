@@ -1,0 +1,32 @@
+# Force LF line endings for shell scripts (prevents Windows CRLF issues)
+*.sh text eol=lf
+*.bash text eol=lf
+scripts/* text eol=lf
+
+# Windows batch files keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Standard text files - auto-detect
+*.ts text
+*.tsx text
+*.js text
+*.json text
+*.css text
+*.md text
+*.sql text
+*.yml text
+*.yaml text
+*.toml text
+*.env text
+
+# Binary files - no conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.mp4 binary
+*.ico binary
+*.woff binary
+*.woff2 binary

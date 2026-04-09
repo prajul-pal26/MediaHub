@@ -2,9 +2,14 @@
 REM ==========================================
 REM  MediaHub — One-Command Start (Windows)
 REM ==========================================
-REM  Usage: start.bat           (keep data between restarts)
+REM  Usage: start.bat           (pull + rebuild everything)
 REM         start.bat --reset   (wipe everything, fresh start)
 REM  Requirements: Docker Desktop + Git
+REM
+REM  Always rebuilds ALL containers on every run so that any change
+REM  (code, schema, migrations, config) is picked up automatically.
+
+cd /d "%~dp0"
 
 echo.
 echo ==========================================
@@ -17,6 +22,7 @@ docker info >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Docker is not running.
     echo Install/start Docker Desktop: https://docs.docker.com/get-docker/
+    pause
     exit /b 1
 )
 echo [1/4] Docker OK
@@ -25,13 +31,13 @@ REM ─── Handle --reset flag ───
 if "%1"=="--reset" (
     echo.
     echo [2/4] Resetting — removing all containers and data...
-    docker compose down -v >nul 2>&1
-    docker builder prune -f >nul 2>&1
+    docker compose down -v 2>nul
+    docker builder prune -f 2>nul
     echo   Clean slate ready.
 ) else (
     echo.
-    echo [2/4] Stopping any existing containers...
-    docker compose down >nul 2>&1
+    echo [2/4] Stopping existing containers...
+    docker compose down 2>nul
 )
 
 REM ─── Pull latest code ───
@@ -46,20 +52,25 @@ if not errorlevel 1 (
         if not errorlevel 1 (
             echo   Pulling latest code...
             git pull
+            echo   Updated.
         ) else (
-            echo   You have staged changes — skipping pull.
+            echo   Updates available, but you have staged changes — skipping pull.
         )
     ) else (
-        echo   You have local changes — skipping pull.
+        echo   Updates available, but you have local changes — skipping pull.
     )
 ) else (
     echo   No git repo — skipping update check.
 )
 
-REM ─── Build and start ───
+REM ─── Build and start ALL services ───
 echo.
 echo [4/4] Building and starting all services...
 echo.
+
+REM Clear Docker build cache to free memory for the build
+docker builder prune -f >nul 2>&1
+
 docker compose up -d --build
 
 echo.
@@ -78,3 +89,4 @@ echo   View logs:   docker compose logs -f app worker
 echo   Stop:        docker compose down
 echo   Full reset:  start.bat --reset
 echo.
+pause
