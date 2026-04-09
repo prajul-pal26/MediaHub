@@ -288,15 +288,23 @@ export const socialAccountsRouter = router({
         .eq("social_account_id", input.accountId);
 
       // 7. Remove orphaned content_posts that have zero remaining jobs
+      //    For imported posts (source='api'), always delete — they belong solely to this account.
+      //    For click posts, only delete if no other account's jobs remain.
       if (postIds.length > 0) {
         for (const pid of postIds) {
+          const { data: postRow } = await db.from("content_posts")
+            .select("source").eq("id", pid).maybeSingle();
+
+          // Check if any jobs from OTHER accounts still reference this post
           const { count } = await db.from("publish_jobs")
             .select("id", { count: "exact", head: true })
             .eq("post_id", pid);
-          if (count === 0) {
+
+          if (count === 0 || postRow?.source === "api") {
             await db.from("post_analytics_history").delete().eq("post_id", pid);
             await db.from("post_analytics").delete().eq("post_id", pid);
             await db.from("comment_sentiments").delete().eq("post_id", pid);
+            await db.from("publish_jobs").delete().eq("post_id", pid); // clean any remaining NULL-account jobs
             await db.from("content_posts").delete().eq("id", pid);
           }
         }

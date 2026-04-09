@@ -1781,8 +1781,9 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
 
         // Fetch insights for this post (use same apiBase as media endpoint)
         let insights: Record<string, number> = {};
+        const isVideo = post.media_type === "VIDEO" || post.media_type === "REELS";
         try {
-          // Use new Instagram API metrics: views replaces impressions/plays
+          // Common metrics for all content types
           const insightsRes = await fetchWithTimeout(
             `${apiBase}/${post.id}/insights?metric=views,reach,saved,total_interactions,shares,likes,comments&access_token=${pageToken}`,
             {}, 10000
@@ -1801,6 +1802,21 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
               ig_comments: getMetric("comments"),
             };
           }
+
+          // For images/carousels: fetch impressions separately (different metric from views)
+          // For reels: impressions is deprecated — leave as 0
+          if (!isVideo) {
+            try {
+              const impRes = await fetchWithTimeout(
+                `${apiBase}/${post.id}/insights?metric=impressions&access_token=${pageToken}`,
+                {}, 10000
+              );
+              const impData = await impRes.json();
+              if (!impData.error) {
+                insights.impressions = impData.data?.[0]?.values?.[0]?.value || 0;
+              }
+            } catch { /* impressions may not be available */ }
+          }
         } catch {
           // Insights may not be available for old posts or without permissions
         }
@@ -1810,14 +1826,16 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
 
         // Save analytics — use real insights data
         const igAnalytics = {
-          views: insights.views || 0,
+          views: isVideo ? (insights.views || 0) : (insights.impressions || insights.reach || 0),
           likes: insights.ig_likes || likes,
           comments: insights.ig_comments || commentsCount,
           shares: insights.shares || 0,
           saves: insights.saves || 0,
           reach: insights.reach || 0,
-          impressions: insights.views || 0,
-          engagement_rate: insights.total_interactions || 0,
+          impressions: isVideo ? 0 : (insights.impressions || 0), // reels: 0 (deprecated), images: real
+          engagement_rate: insights.total_interactions && insights.reach
+            ? Math.round(insights.total_interactions / insights.reach * 10000) / 100
+            : 0,
         };
 
         await db().from("post_analytics").insert({
