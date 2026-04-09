@@ -435,13 +435,19 @@ export default function PostAnalyticsPage() {
                             {sourceLabels[post.source] || post.source}
                           </span>
                         </TableCell>
-                        <TableCell className="text-right font-medium">{post.views > 0 ? post.views.toLocaleString() : <span className="text-muted-foreground">—</span>}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">{post.impressions > 0 ? post.impressions.toLocaleString() : "—"}</TableCell>
+                        <TableCell className="text-right font-medium">{post.views.toLocaleString()}</TableCell>
+                        <TableCell className="text-right text-muted-foreground">
+                          {post.action === "ig_reel" ? (
+                            <span>—</span>
+                          ) : (
+                            post.impressions.toLocaleString()
+                          )}
+                        </TableCell>
                         <TableCell className="text-right">{post.likes.toLocaleString()}</TableCell>
                         <TableCell className="text-right">{post.comments.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">{post.shares > 0 ? post.shares.toLocaleString() : <span className="text-muted-foreground">—</span>}</TableCell>
+                        <TableCell className="text-right">{post.shares.toLocaleString()}</TableCell>
                         <TableCell className="text-right">
-                          {post.retention_rate > 0 ? (
+                          {post.action?.startsWith("yt_") ? (
                             <span className="text-xs">{post.retention_rate}%</span>
                           ) : (
                             <span className="text-xs text-muted-foreground">—</span>

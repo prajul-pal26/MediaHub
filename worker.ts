@@ -1301,6 +1301,7 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
     watch_time_seconds: Math.round(watchTimeMinutes * 60),
     avg_view_duration_seconds: Math.round(avgViewDuration),
     retention_rate: retentionRate,
+    platform_specific: { permalink: `https://www.youtube.com/watch?v=${platformPostId}` },
   };
 }
 
@@ -1312,9 +1313,9 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
   if (!pageToken) return null;
   const apiBase = encryptedPageToken ? "https://graph.facebook.com/v19.0" : "https://graph.instagram.com/v21.0";
 
-  // Get basic metrics + media type first (this almost always works)
+  // Get basic metrics + media type + permalink (this almost always works)
   const mediaRes = await fetchWithTimeout(
-    `${apiBase}/${platformPostId}?fields=like_count,comments_count,timestamp,media_type&access_token=${pageToken}`
+    `${apiBase}/${platformPostId}?fields=like_count,comments_count,timestamp,media_type,permalink&access_token=${pageToken}`
   );
   const mediaData = await mediaRes.json();
   if (mediaData.error) {
@@ -1326,20 +1327,20 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
   const commentsCount = mediaData.comments_count || 0;
   const isVideo = mediaData.media_type === "VIDEO" || mediaData.media_type === "REELS";
 
-  // Try Insights API — may fail for some post types or insufficient permissions
+  // Try Insights API — metrics differ by content type
+  let views = 0;
   let impressions = 0;
   let reach = 0;
   let saved = 0;
+  let shares = 0;
   let engagementMetric = 0;
-  let videoViews = 0;
+  let avgWatchTimeMs = 0;
 
   try {
-    // Use new Instagram API metrics: views,reach,saved,total_interactions,shares,likes,comments
-    // Note: "impressions" and "plays" are deprecated — "views" replaces both
-    const metrics = "views,reach,saved,total_interactions,shares,likes,comments";
-
+    // Common metrics for all content types
+    const commonMetrics = "views,reach,saved,total_interactions,shares,likes,comments";
     const insightsRes = await fetchWithTimeout(
-      `${apiBase}/${platformPostId}/insights?metric=${metrics}&access_token=${pageToken}`
+      `${apiBase}/${platformPostId}/insights?metric=${commonMetrics}&access_token=${pageToken}`
     );
     const insightsData = await insightsRes.json();
 
@@ -1347,43 +1348,63 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
       const insightsList = insightsData.data || [];
       const getMetric = (name: string) => insightsList.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
 
-      impressions = getMetric("views"); // views replaces impressions
+      views = getMetric("views");
       reach = getMetric("reach");
       saved = getMetric("saved");
       engagementMetric = getMetric("total_interactions");
-      videoViews = getMetric("views");
+      shares = getMetric("shares");
     } else {
       console.warn(`[analytics] IG insights unavailable for ${platformPostId}: ${insightsData.error.message}`);
+    }
+
+    // For FEED posts (images/carousels): "impressions" is a separate metric (total times shown, incl. repeats)
+    // For reels: impressions metric is deprecated and will never be available — leave as 0
+    if (!isVideo) {
+      try {
+        const impRes = await fetchWithTimeout(
+          `${apiBase}/${platformPostId}/insights?metric=impressions&access_token=${pageToken}`
+        );
+        const impData = await impRes.json();
+        if (!impData.error) {
+          impressions = impData.data?.[0]?.values?.[0]?.value || 0;
+        }
+      } catch { /* impressions may not be available for newer posts */ }
+    }
+
+    // For reels: fetch average watch time
+    if (isVideo) {
+      try {
+        const watchRes = await fetchWithTimeout(
+          `${apiBase}/${platformPostId}/insights?metric=ig_reels_avg_watch_time&access_token=${pageToken}`
+        );
+        const watchData = await watchRes.json();
+        if (!watchData.error) {
+          avgWatchTimeMs = watchData.data?.[0]?.values?.[0]?.value || 0;
+        }
+      } catch { /* avg watch time may not be available */ }
     }
   } catch (e: any) {
     console.warn(`[analytics] IG insights fetch failed for ${platformPostId}:`, e.message);
   }
 
-  // Determine views: use the best available metric
-  // For videos: video_views > impressions > reach
-  // For images: impressions > reach > (likes + comments as minimum floor)
-  let views: number;
-  if (isVideo) {
-    views = videoViews || impressions || reach || 0;
-  } else {
-    views = impressions || reach || 0;
-  }
-
-  // For video content: retention = video_views / impressions (what % of people who saw it actually watched)
-  const retentionRate = isVideo && impressions > 0 && videoViews > 0
-    ? Math.round((videoViews / impressions) * 10000) / 100
+  // Engagement: total_interactions / reach (industry standard for Instagram)
+  const engageDenominator = reach || views || 0;
+  const engagementRate = engageDenominator > 0
+    ? Math.round((engagementMetric || (likes + commentsCount + shares + saved)) / engageDenominator * 10000) / 100
     : 0;
 
   return {
-    views,
+    views: isVideo ? views : (impressions || reach || 0), // For images: impressions as "views" (times shown)
     likes,
     comments: commentsCount,
-    shares: 0,
+    shares,
     saves: saved,
     reach,
-    impressions,
-    retention_rate: retentionRate,
-    engagement_rate: views > 0 ? Math.round((likes + commentsCount) / views * 10000) / 100 : 0,
+    impressions, // 0 for reels (metric doesn't exist), real value for images
+    retention_rate: 0, // Instagram doesn't provide retention (YouTube only)
+    engagement_rate: engagementRate,
+    watch_time_seconds: avgWatchTimeMs > 0 ? Math.round(avgWatchTimeMs / 1000) : 0,
+    platform_specific: { permalink: mediaData.permalink || null, media_type: mediaData.media_type },
   };
 }
 
@@ -1403,6 +1424,11 @@ async function fetchLinkedInAnalytics(account: any, platformPostId: string) {
   if (!res.ok) return null;
   const data = await res.json();
 
+  // Construct LinkedIn permalink from share URN
+  const permalink = platformPostId.startsWith("urn:li:")
+    ? `https://www.linkedin.com/feed/update/${platformPostId}`
+    : null;
+
   return {
     views: data.impressionCount || 0,
     likes: data.likeCount || 0,
@@ -1413,6 +1439,7 @@ async function fetchLinkedInAnalytics(account: any, platformPostId: string) {
     engagement_rate: (data.impressionCount || 0) > 0
       ? Math.round(((data.likeCount || 0) + (data.commentCount || 0) + (data.shareCount || 0) + (data.clickCount || 0)) / data.impressionCount * 10000) / 100
       : 0,
+    platform_specific: { permalink },
   };
 }
 
@@ -1425,9 +1452,9 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
   const pageId = account.platform_user_id || account.platform_metadata?.page_id;
   const fullPostId = platformPostId.includes("_") ? platformPostId : `${pageId}_${platformPostId}`;
 
-  // Get basic metrics using edges with summary (this always works)
+  // Get basic metrics + permalink using edges with summary (this always works)
   const postRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares&access_token=${pageToken}`
+    `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares,permalink_url&access_token=${pageToken}`
   );
   const postData = await postRes.json();
   if (postData.error) {
@@ -1471,6 +1498,7 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
     engagement_rate: reactions + comments + shares > 0 && impressions > 0
       ? Math.round((reactions + comments + shares) / impressions * 10000) / 100
       : 0,
+    platform_specific: { permalink: postData.permalink_url || null },
   };
 }
 
@@ -1588,7 +1616,7 @@ const analyticsWorker = new Worker(
             .select("org_id").eq("id", post.brand_id).single();
           if (!brand) continue;
 
-          let analytics: Record<string, number> | null = null;
+          let analytics: Record<string, any> | null = null;
 
           if (pj.action.startsWith("yt_")) {
             analytics = await fetchYouTubeAnalytics(account, pj.platform_post_id, brand.org_id);
@@ -1604,6 +1632,14 @@ const analyticsWorker = new Worker(
             analytics = await fetchTwitterAnalytics(account, pj.platform_post_id);
           } else if (pj.action.startsWith("sc_")) {
             analytics = await fetchSnapchatAnalytics(account, pj.platform_post_id);
+          }
+
+          // If fetch failed but we can construct a permalink, store at least that
+          if (!analytics && pj.action.startsWith("li_") && pj.platform_post_id?.startsWith("urn:li:")) {
+            analytics = {
+              views: 0, likes: 0, comments: 0, shares: 0, impressions: 0,
+              platform_specific: { permalink: `https://www.linkedin.com/feed/update/${pj.platform_post_id}` },
+            };
           }
 
           if (analytics) {
