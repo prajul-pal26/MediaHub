@@ -76,10 +76,10 @@ echo ""
 echo "[4/4] Building and starting all services..."
 echo ""
 
-# Clear Docker build cache to free memory for the build
-docker builder prune -f > /dev/null 2>&1 || true
-
-docker compose up -d --build
+# Build sequentially — worker first (small), then app (heavy) to avoid OOM
+DOCKER_BUILDKIT=1 docker compose build worker 2>&1
+DOCKER_BUILDKIT=1 docker compose build app 2>&1
+docker compose up -d
 
 echo ""
 echo "=========================================="

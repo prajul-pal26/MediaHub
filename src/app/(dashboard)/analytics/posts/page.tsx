@@ -13,7 +13,7 @@ import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
 import {
   BarChart3, Eye, Heart, MessageSquare, Share2, Users, Loader2,
-  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, Clock, ChevronDown, RefreshCw,
+  ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, ChevronDown, RefreshCw,
 } from "lucide-react";
 
 const platformColors: Record<string, string> = {
@@ -156,19 +156,19 @@ function StatCard({ icon, label, total, byPlatform, format }: {
 }) {
   const fmt = format || ((n: number) => n.toLocaleString());
   return (
-    <Card>
+    <Card className="border border-black/80 dark:border-white/20 shadow-[0_2px_8px_rgba(0,0,0,0.3)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-all">
       <CardContent className="pt-4 pb-3">
-        <div className="flex items-center gap-2 mb-1">
+        <p className="text-sm font-semibold tracking-wide text-muted-foreground/80 uppercase mb-1">{label}</p>
+        <div className="flex items-center gap-2 mb-2">
           {icon}
-          <p className="text-xl font-bold">{fmt(total)}</p>
+          <p className="text-2xl font-bold">{fmt(total)}</p>
         </div>
-        <p className="text-xs text-muted-foreground mb-2">{label}</p>
         {byPlatform && Object.keys(byPlatform).length > 0 && (
-          <div className="space-y-1 border-t pt-2">
+          <div className="space-y-1.5 border-t border-border/40 pt-2 mt-1">
             {Object.entries(byPlatform).map(([platform, value]) => (
               <div key={platform} className="flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">{platformLabels[platform] || platform}</span>
-                <span className="font-medium">{fmt(value)}</span>
+                <span className="font-semibold">{fmt(value)}</span>
               </div>
             ))}
           </div>
@@ -178,10 +178,33 @@ function StatCard({ icon, label, total, byPlatform, format }: {
   );
 }
 
+// Platform-specific column config: which columns to show per platform
+const platformColumns: Record<string, string[]> = {
+  all:       ["views_impressions", "reach", "likes", "comments", "shares", "saves", "engagement"],
+  instagram: ["views_impressions", "reach", "likes", "comments", "shares", "saves", "engagement"],
+  facebook:  ["views_impressions", "reach", "likes", "comments", "shares", "engagement"],
+  youtube:   ["views_impressions", "likes", "comments", "shares", "engagement"],
+  linkedin:  ["views_impressions", "likes", "comments", "shares", "engagement"],
+  tiktok:    ["views_impressions", "likes", "comments", "shares", "engagement"],
+  twitter:   ["views_impressions", "likes", "comments", "shares", "engagement"],
+  snapchat:  ["views_impressions", "likes", "comments", "shares", "engagement"],
+};
+
+const columnLabels: Record<string, string> = {
+  views_impressions: "Views / Impressions",
+  reach: "Reach",
+  likes: "Likes",
+  comments: "Comments",
+  shares: "Shares",
+  saves: "Saves",
+  engagement: "Engagement",
+};
+
 export default function PostAnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
   const { profile } = useUser();
   const [page, setPage] = useState(1);
+  const [platformFilter, setPlatformFilter] = useState<string>("");
   const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
   const utils = trpc.useUtils();
 
@@ -215,9 +238,25 @@ export default function PostAnalyticsPage() {
 
   const { data: postsData, isLoading: postsLoading } =
     trpc.analytics.getPostAnalytics.useQuery(
-      { brandId: activeBrandId!, page, limit: 20 },
+      { brandId: activeBrandId!, page, limit: 20, platform: platformFilter || undefined },
       { enabled: !!activeBrandId }
     );
+
+  // Get connected accounts to build platform toggle dynamically
+  const { data: accounts } = trpc.socialAccounts.list.useQuery(
+    { brandId: activeBrandId! },
+    { enabled: !!activeBrandId }
+  );
+
+  // Unique platforms from connected accounts
+  const connectedPlatforms = [...new Set((accounts || []).map((a: any) => a.platform))].filter(Boolean) as string[];
+
+  // Auto-select first platform when accounts load
+  React.useEffect(() => {
+    if (connectedPlatforms.length > 0 && !platformFilter) {
+      setPlatformFilter(connectedPlatforms[0]);
+    }
+  }, [connectedPlatforms.length]);
 
   if (loading) {
     return (
@@ -244,18 +283,40 @@ export default function PostAnalyticsPage() {
   const posts = postsData?.posts || [];
   const totalPages = postsData?.totalPages || 1;
   const total = summary?.total;
-  const bp = summary?.byPlatform || {};
+  const ba = summary?.byAccount || {};
 
-  // Helper to extract a metric per account (platform/@username)
+  // Metrics that are NEVER available for certain platforms (show — in UI)
+  const metricUnavailable: Record<string, string[]> = {
+    saves: ["facebook", "linkedin", "youtube", "tiktok", "twitter"],
+    reach: ["youtube"],
+  };
+
+  // Helper to extract a metric per account from getSummary (all posts, not just current page)
   function byAccountMetric(metric: string): Record<string, number> {
     const result: Record<string, number> = {};
-    for (const post of posts) {
-      const key = `${platformLabels[post.platform] || post.platform}/@${post.account_name}`;
-      const val = (post as any)?.[metric] || 0;
-      result[key] = (result[key] || 0) + val;
+    for (const [accountKey, data] of Object.entries(ba)) {
+      // accountKey format: "instagram/@username"
+      const platform = accountKey.split("/")[0];
+
+      // Skip accounts where this metric can never exist
+      const checkMetric = metric === "_views_impressions" ? null : metric === "_count" ? null : metric;
+      if (checkMetric && metricUnavailable[checkMetric]?.includes(platform)) continue;
+
+      let val: number;
+      if (metric === "_count") {
+        val = (data as any)?.posts || 0;
+      } else if (metric === "_views_impressions") {
+        val = ((data as any)?.views || 0) + ((data as any)?.impressions || 0);
+      } else {
+        val = (data as any)?.[metric] || 0;
+      }
+
+      // Convert "instagram/@jerrylucas148" to "Instagram/@jerrylucas148"
+      const [plat, ...rest] = accountKey.split("/");
+      const label = `${platformLabels[plat] || plat}/${rest.join("/")}`;
+      result[label] = val;
     }
-    // Only include non-zero values
-    return Object.fromEntries(Object.entries(result).filter(([, v]) => v > 0));
+    return result;
   }
 
   return (
@@ -270,7 +331,7 @@ export default function PostAnalyticsPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
+          onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId, platform: platformFilter || undefined })}
           disabled={refreshMutation.isPending || !activeBrandId}
         >
           {refreshMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
@@ -292,10 +353,22 @@ export default function PostAnalyticsPage() {
         ) : (
           <>
             <StatCard
+              icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />}
+              label="Total Posts"
+              total={postsData?.total || 0}
+              byPlatform={byAccountMetric("_count")}
+            />
+            <StatCard
               icon={<Eye className="h-4 w-4 text-muted-foreground" />}
-              label="Total Views"
-              total={total?.views || 0}
-              byPlatform={byAccountMetric("views")}
+              label="Views / Impressions"
+              total={(total?.views || 0) + (total?.impressions || 0)}
+              byPlatform={byAccountMetric("_views_impressions")}
+            />
+            <StatCard
+              icon={<Users className="h-4 w-4 text-muted-foreground" />}
+              label="Reach"
+              total={total?.reach || 0}
+              byPlatform={byAccountMetric("reach")}
             />
             <StatCard
               icon={<Heart className="h-4 w-4 text-muted-foreground" />}
@@ -317,29 +390,16 @@ export default function PostAnalyticsPage() {
             />
             <StatCard
               icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />}
-              label="Impressions"
-              total={total?.impressions || 0}
-              byPlatform={byAccountMetric("impressions")}
-            />
-            <StatCard
-              icon={<Users className="h-4 w-4 text-muted-foreground" />}
-              label="Avg Engagement"
-              total={total?.engagement || 0}
-              byPlatform={byAccountMetric("engagement_rate")}
-              format={(n) => `${n}%`}
-            />
-            <StatCard
-              icon={<Clock className="h-4 w-4 text-muted-foreground" />}
-              label="Avg Retention"
-              total={total?.retention_rate || 0}
-              byPlatform={byAccountMetric("retention_rate")}
-              format={(n) => `${n}%`}
+              label="Total Saves"
+              total={total?.saves || 0}
+              byPlatform={byAccountMetric("saves")}
             />
             <StatCard
               icon={<MousePointer className="h-4 w-4 text-muted-foreground" />}
-              label="Total Clicks"
-              total={total?.clicks || 0}
-              byPlatform={byAccountMetric("clicks")}
+              label="Avg Engagement"
+              total={total?.engagement || 0}
+              byPlatform={byAccountMetric("engagement")}
+              format={(n) => `${n}%`}
             />
           </>
         )}
@@ -348,9 +408,24 @@ export default function PostAnalyticsPage() {
       {/* Posts Table */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">
-            All Posts ({postsData?.total || 0})
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-lg">
+              {platformLabels[platformFilter] || platformFilter || "All"} Posts ({postsData?.total || 0})
+            </CardTitle>
+            <div className="flex gap-1 flex-wrap">
+              {connectedPlatforms.map((p) => (
+                <Button
+                  key={p}
+                  variant={platformFilter === p ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => { setPlatformFilter(p); setPage(1); }}
+                  className={`text-xs ${platformFilter === p ? "" : platformColors[p] || ""}`}
+                >
+                  {platformLabels[p] || p}
+                </Button>
+              ))}
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {postsLoading ? (
@@ -366,21 +441,22 @@ export default function PostAnalyticsPage() {
           ) : (
             <>
               <div className="overflow-x-auto">
+                {(() => {
+                  const cols = platformColumns[platformFilter] || platformColumns.all;
+                  const fixedCols = 5; // Post, Link, Type, Platform, Source
+                  const totalCols = fixedCols + cols.length + 1 + (canDelete ? 1 : 0); // +1 for Published
+                  return (
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Post</TableHead>
                       <TableHead>Link</TableHead>
                       <TableHead>Type</TableHead>
-                      <TableHead>Platform</TableHead>
+                      {!platformFilter && <TableHead>Platform</TableHead>}
                       <TableHead>Source</TableHead>
-                      <TableHead className="text-right">Views</TableHead>
-                      <TableHead className="text-right">Impressions</TableHead>
-                      <TableHead className="text-right">Likes</TableHead>
-                      <TableHead className="text-right">Comments</TableHead>
-                      <TableHead className="text-right">Shares</TableHead>
-                      <TableHead className="text-right">Retention</TableHead>
-                      <TableHead className="text-right">Engagement</TableHead>
+                      {cols.map((col) => (
+                        <TableHead key={col} className="text-right">{columnLabels[col]}</TableHead>
+                      ))}
                       <TableHead>Published</TableHead>
                       {canDelete && <TableHead></TableHead>}
                     </TableRow>
@@ -422,42 +498,47 @@ export default function PostAnalyticsPage() {
                             {post.content_type}
                           </span>
                         </TableCell>
-                        <TableCell>
-                          <div>
-                            <Badge variant="secondary" className={`text-xs ${platformColors[post.platform] || ""}`}>
-                              {platformLabels[post.platform] || post.platform}
-                            </Badge>
-                            <p className="text-[10px] text-muted-foreground mt-0.5">@{post.account_name}</p>
-                          </div>
-                        </TableCell>
+                        {!platformFilter && (
+                          <TableCell>
+                            <div>
+                              <Badge variant="secondary" className={`text-xs ${platformColors[post.platform] || ""}`}>
+                                {platformLabels[post.platform] || post.platform}
+                              </Badge>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">@{post.account_name}</p>
+                            </div>
+                          </TableCell>
+                        )}
                         <TableCell>
                           <span className="text-xs text-muted-foreground">
                             {sourceLabels[post.source] || post.source}
                           </span>
                         </TableCell>
-                        <TableCell className="text-right font-medium">{post.views.toLocaleString()}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">
-                          {post.action === "ig_reel" ? (
-                            <span>—</span>
-                          ) : (
-                            post.impressions.toLocaleString()
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">{post.likes.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">{post.comments.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">{post.shares.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">
-                          {post.action?.startsWith("yt_") ? (
-                            <span className="text-xs">{post.retention_rate}%</span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Badge variant={post.engagement_rate > 5 ? "default" : "secondary"} className="text-xs">
-                            {post.engagement_rate}%
-                          </Badge>
-                        </TableCell>
+                        {cols.map((col) => {
+                          switch (col) {
+                            case "views_impressions":
+                              return <TableCell key={col} className="text-right font-medium">{(post.views || post.impressions || 0).toLocaleString()}</TableCell>;
+                            case "reach":
+                              return <TableCell key={col} className="text-right">{post.reach.toLocaleString()}</TableCell>;
+                            case "likes":
+                              return <TableCell key={col} className="text-right">{post.likes.toLocaleString()}</TableCell>;
+                            case "comments":
+                              return <TableCell key={col} className="text-right">{post.comments.toLocaleString()}</TableCell>;
+                            case "shares":
+                              return <TableCell key={col} className="text-right">{post.shares.toLocaleString()}</TableCell>;
+                            case "saves":
+                              return <TableCell key={col} className="text-right">{post.saves.toLocaleString()}</TableCell>;
+                            case "engagement":
+                              return (
+                                <TableCell key={col} className="text-right">
+                                  <Badge variant={post.engagement_rate > 5 ? "default" : "secondary"} className="text-xs">
+                                    {post.engagement_rate}%
+                                  </Badge>
+                                </TableCell>
+                              );
+                            default:
+                              return null;
+                          }
+                        })}
                         <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                           {post.published_at
                             ? new Date(post.published_at).toLocaleDateString()
@@ -469,7 +550,8 @@ export default function PostAnalyticsPage() {
                               variant="ghost"
                               size="sm"
                               className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600"
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 if (confirm(`Delete this ${post.content_type}? Analytics data will be permanently removed.`)) {
                                   deleteMutation.mutate({ postId: post.id });
                                 }
@@ -483,7 +565,7 @@ export default function PostAnalyticsPage() {
                       </TableRow>
                       {expandedPostId === post.id && (
                         <TableRow>
-                          <TableCell colSpan={canDelete ? 13 : 12} className="bg-muted/30 p-4">
+                          <TableCell colSpan={totalCols} className="bg-muted/30 p-4">
                             <PostProgressPanel postId={post.id} />
                           </TableCell>
                         </TableRow>
@@ -492,6 +574,8 @@ export default function PostAnalyticsPage() {
                     ))}
                   </TableBody>
                 </Table>
+                  );
+                })()}
               </div>
 
               {totalPages > 1 && (

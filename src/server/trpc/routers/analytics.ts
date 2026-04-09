@@ -770,7 +770,12 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
         .range(offset, offset + input.limit - 1);
 
       if (input.platform) {
-        jobQuery = jobQuery.ilike("action", `${input.platform}%`);
+        const platformActionPrefix: Record<string, string> = {
+          instagram: "ig_", youtube: "yt_", linkedin: "li_", facebook: "fb_",
+          tiktok: "tt_", twitter: "tw_", snapchat: "sc_",
+        };
+        const prefix = platformActionPrefix[input.platform] || `${input.platform}_`;
+        jobQuery = jobQuery.ilike("action", `${prefix}%`);
       }
 
       const { data: jobs, error, count } = await jobQuery;
@@ -1162,7 +1167,7 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
   // ━━━ Manual Analytics Refresh ━━━
 
   refreshAnalytics: protectedProcedure
-    .input(z.object({ brandId: z.string().uuid() }))
+    .input(z.object({ brandId: z.string().uuid(), platform: z.string().optional() }))
     .mutation(async ({ ctx, input }) => {
       const { profile } = ctx;
       assertBrandAccess(profile, input.brandId);
@@ -1171,11 +1176,12 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       const { getQueueConnection } = await import("@/server/queue/connection");
       const analyticsQueue = new Queue("analytics-fetch", { connection: getQueueConnection() });
 
-      await analyticsQueue.add("manual-refresh", { brandId: input.brandId }, {
-        jobId: `analytics-manual-${input.brandId}-${Date.now()}`,
+      await analyticsQueue.add("manual-refresh", { brandId: input.brandId, platform: input.platform }, {
+        jobId: `analytics-manual-${input.brandId}-${input.platform || "all"}-${Date.now()}`,
       });
 
-      return { queued: true, message: "Analytics refresh started. Data will update shortly." };
+      const platformLabel = input.platform ? input.platform.charAt(0).toUpperCase() + input.platform.slice(1) : "all platforms";
+      return { queued: true, message: `Analytics refresh started for ${platformLabel}. Data will update shortly.` };
     }),
 
   // ━━━ Trigger Trend Forecast (manual refresh) ━━━

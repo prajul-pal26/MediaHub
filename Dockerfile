@@ -1,22 +1,29 @@
+# syntax=docker/dockerfile:1
 # ============================================
 # MediaHub — Multi-stage Dockerfile
 # ============================================
 # Targets:
 #   app    — Production Next.js server (pre-compiled, fast)
 #   worker — BullMQ background worker
+#
+# Optimizations:
+#   - BuildKit cache mounts for npm (skip npm ci on code-only changes)
+#   - BuildKit cache mount for .next/cache (incremental Next.js builds)
+#   - Separate base images for app vs worker (worker doesn't need ffmpeg)
 # ============================================
 
-# ─── Base ───
+# ─── Base (shared) ───
 FROM node:20-alpine AS base
-RUN apk add --no-cache libc6-compat ffmpeg
+RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
-# ─── Dependencies ───
+# ─── Dependencies (cached unless package.json changes) ───
 FROM base AS deps
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
-# ─── Builder ───
+# ─── Builder (Next.js production build) ───
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -29,10 +36,13 @@ ENV NEXT_PUBLIC_APP_URL=https://localhost:3443
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=2048
 
-RUN npm run build
+# Cache .next/cache between builds for faster incremental compilation
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 
 # ─── Production App ───
-FROM base AS app
+FROM node:20-alpine AS app
+WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -50,8 +60,10 @@ ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 CMD ["node", "server.js"]
 
-# ─── Worker ───
-FROM base AS worker
+# ─── Worker (doesn't need Next.js build, just tsx + node_modules) ───
+FROM node:20-alpine AS worker
+RUN apk add --no-cache libc6-compat ffmpeg
+WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 CMD ["npx", "tsx", "worker.ts"]

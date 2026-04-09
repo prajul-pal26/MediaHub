@@ -1152,6 +1152,7 @@ const publishWorker = new Worker(
               engagement_rate: 0,
               retention_rate: 0,
               watch_time_seconds: 0,
+              platform_specific: {},
               fetched_at: null, // null = not yet fetched from platform
             });
             console.log(`[publish] Created initial analytics entry for job ${publishJobId}`);
@@ -1393,14 +1394,19 @@ async function fetchInstagramAnalytics(account: any, platformPostId: string) {
     ? Math.round((engagementMetric || (likes + commentsCount + shares + saved)) / engageDenominator * 10000) / 100
     : 0;
 
+  // For the combined Views/Impressions column:
+  // Reels: views = plays. Images: views metric works on some accounts, impressions on business accounts.
+  // Use whichever is available: impressions > views > 0
+  const viewsValue = isVideo ? views : (impressions || views || 0);
+
   return {
-    views: isVideo ? views : (impressions || reach || 0), // For images: impressions as "views" (times shown)
+    views: viewsValue,
     likes,
     comments: commentsCount,
     shares,
     saves: saved,
     reach,
-    impressions, // 0 for reels (metric doesn't exist), real value for images
+    impressions: isVideo ? 0 : (impressions || views || 0), // Reels: — (deprecated). Images: best available
     retention_rate: 0, // Instagram doesn't provide retention (YouTube only)
     engagement_rate: engagementRate,
     watch_time_seconds: avgWatchTimeMs > 0 ? Math.round(avgWatchTimeMs / 1000) : 0,
@@ -1536,6 +1542,7 @@ async function fetchTikTokAnalytics(account: any, platformPostId: string) {
     engagement_rate: views > 0
       ? Math.round((likes + comments + shares) / views * 10000) / 100
       : 0,
+    platform_specific: { permalink: video.share_url || `https://www.tiktok.com/@/video/${platformPostId}` },
   };
 }
 
@@ -1567,6 +1574,7 @@ async function fetchTwitterAnalytics(account: any, platformPostId: string) {
     engagement_rate: impressions > 0
       ? Math.round((likes + replies + retweets + quotes) / impressions * 10000) / 100
       : 0,
+    platform_specific: { permalink: `https://x.com/i/status/${platformPostId}` },
   };
 }
 
@@ -1582,9 +1590,16 @@ async function fetchSnapchatAnalytics(_account: any, _platformPostId: string) {
 const analyticsWorker = new Worker(
   "analytics-fetch",
   async (job) => {
-    // Support both cron (all posts) and manual trigger (specific brand)
+    // Support both cron (all posts) and manual trigger (specific brand + optional platform)
     const brandId = job.data?.brandId as string | undefined;
-    console.log(`[analytics] Fetching analytics${brandId ? ` for brand ${brandId}` : " for all published posts"}...`);
+    const platformFilter = job.data?.platform as string | undefined;
+    const platformActionPrefix: Record<string, string> = {
+      instagram: "ig_", youtube: "yt_", linkedin: "li_", facebook: "fb_",
+      tiktok: "tt_", twitter: "tw_", snapchat: "sc_",
+    };
+    const actionPrefix = platformFilter ? platformActionPrefix[platformFilter] : null;
+
+    console.log(`[analytics] Fetching analytics${brandId ? ` for brand ${brandId}` : " for all published posts"}${platformFilter ? ` (${platformFilter} only)` : ""}...`);
 
     let query = db().from("content_posts")
       .select("id, brand_id, publish_jobs(id, social_account_id, platform_post_id, action, status)")
@@ -1601,6 +1616,8 @@ const analyticsWorker = new Worker(
 
     for (const post of posts || []) {
       for (const pj of post.publish_jobs || []) {
+        // If platform filter is set, skip non-matching actions
+        if (actionPrefix && !pj.action.startsWith(actionPrefix)) continue;
         if (pj.status !== "completed" || !pj.platform_post_id) continue;
         // Skip stories — ephemeral content, no lasting analytics
         if (pj.action.endsWith("_story")) continue;
@@ -1741,7 +1758,7 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
   let url: string | null = `${apiBase}/${igUserId}/media?fields=id,caption,media_type,media_url,thumbnail_url,timestamp,like_count,comments_count,permalink&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
-  while (url && totalImported < 100000) {
+  while (url && true) {
     const res = await fetchWithTimeout(url, {}, 30000);
     const data = await res.json();
 
@@ -1769,19 +1786,19 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
         if (!contentPost) continue;
 
         // Create publish job record (no media_asset needed)
-        await db().from("publish_jobs").insert({
+        const isVideo = post.media_type === "VIDEO" || post.media_type === "REELS";
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
-          action: post.media_type === "VIDEO" ? "ig_reel" : "ig_post",
+          action: isVideo ? "ig_reel" : (post.media_type === "CAROUSEL_ALBUM" ? "ig_carousel" : "ig_post"),
           status: "completed",
           platform_post_id: post.id,
           completed_at: post.timestamp,
-        });
+        }).select("id").single();
 
         // Fetch insights for this post (use same apiBase as media endpoint)
         let insights: Record<string, number> = {};
-        const isVideo = post.media_type === "VIDEO" || post.media_type === "REELS";
         try {
           // Common metrics for all content types
           const insightsRes = await fetchWithTimeout(
@@ -1825,14 +1842,16 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
         const commentsCount = post.comments_count || 0;
 
         // Save analytics — use real insights data
+        // For images: impressions (business accounts) or views (creator accounts) — use best available
+        const imageViewsValue = isVideo ? (insights.views || 0) : (insights.impressions || insights.views || 0);
         const igAnalytics = {
-          views: isVideo ? (insights.views || 0) : (insights.impressions || insights.reach || 0),
+          views: imageViewsValue,
           likes: insights.ig_likes || likes,
           comments: insights.ig_comments || commentsCount,
           shares: insights.shares || 0,
           saves: insights.saves || 0,
           reach: insights.reach || 0,
-          impressions: isVideo ? 0 : (insights.impressions || 0), // reels: 0 (deprecated), images: real
+          impressions: isVideo ? 0 : (insights.impressions || insights.views || 0),
           engagement_rate: insights.total_interactions && insights.reach
             ? Math.round(insights.total_interactions / insights.reach * 10000) / 100
             : 0,
@@ -1841,12 +1860,13 @@ async function importInstagramHistory(account: any, brandId: string, _orgId: str
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...igAnalytics,
           platform_specific: { permalink: post.permalink, media_type: post.media_type },
           fetched_at: new Date().toISOString(),
         });
 
-        await appendAnalyticsHistory(contentPost.id, account.id, igAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, igAnalytics, publishJob?.id);
 
         totalImported++;
 
@@ -1948,7 +1968,7 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
         const isShort = totalSeconds <= 60 && !duration.includes("H");
 
         // Create publish job (no media_asset needed)
-        await db().from("publish_jobs").insert({
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
@@ -1956,7 +1976,7 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
           status: "completed",
           platform_post_id: video.id,
           completed_at: snippet.publishedAt,
-        });
+        }).select("id").single();
 
         // Save analytics
         const ytAnalytics = {
@@ -1969,12 +1989,13 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...ytAnalytics,
-          platform_specific: { video_id: video.id, duration: video.contentDetails?.duration },
+          platform_specific: { video_id: video.id, duration: video.contentDetails?.duration, permalink: `https://www.youtube.com/watch?v=${video.id}` },
           fetched_at: new Date().toISOString(),
         });
 
-        await appendAnalyticsHistory(contentPost.id, account.id, ytAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, ytAnalytics, publishJob?.id);
 
         totalImported++;
       } catch (e: any) {
@@ -1988,7 +2009,7 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
     if (totalImported % 50 === 0 && totalImported > 0) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-  } while (pageToken && totalImported < 100000);
+  } while (pageToken && true);
 
   console.log(`[historical] YouTube import complete: ${totalImported} videos`);
   return totalImported;
@@ -2002,10 +2023,10 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
 
   console.log(`[historical] Importing Facebook history for page ${account.platform_username}...`);
 
-  let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,type,full_picture,permalink_url&limit=50&access_token=${pageToken}`;
+  let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,permalink_url,attachments{type,media_type}&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
-  while (url && totalImported < 100000) {
+  while (url) {
     const res = await fetchWithTimeout(url, {}, 30000);
     const data = await res.json();
 
@@ -2026,8 +2047,12 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
 
         if (!contentPost) continue;
 
-        const action = post.type === "video" ? "fb_reel" : "fb_post";
-        await db().from("publish_jobs").insert({
+        const attachmentType = post.attachments?.data?.[0]?.media_type || post.attachments?.data?.[0]?.type || "";
+        const action = attachmentType.toLowerCase().includes("video") ? "fb_reel" : "fb_post";
+        const pageId = account.platform_user_id || account.platform_metadata?.page_id;
+        const fullPostId = post.id.includes("_") ? post.id : `${pageId}_${post.id}`;
+
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
@@ -2035,32 +2060,35 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
           status: "completed",
           platform_post_id: post.id,
           completed_at: post.created_time,
-        });
+        }).select("id").single();
 
-        // Fetch basic metrics
+        // Fetch basic metrics using pageId_postId format
         let metrics: Record<string, number> = {};
         try {
           const metricsRes = await fetchWithTimeout(
-            `https://graph.facebook.com/v19.0/${post.id}?fields=shares,reactions.summary(true),comments.summary(true)&access_token=${pageToken}`,
+            `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares,permalink_url&access_token=${pageToken}`,
             {}, 10000
           );
           const metricsData = await metricsRes.json();
-          metrics = {
-            likes: metricsData.reactions?.summary?.total_count || 0,
-            comments: metricsData.comments?.summary?.total_count || 0,
-            shares: metricsData.shares?.count || 0,
-          };
+          if (!metricsData.error) {
+            metrics = {
+              likes: metricsData.reactions?.summary?.total_count || 0,
+              comments: metricsData.comments?.summary?.total_count || 0,
+              shares: metricsData.shares?.count || 0,
+            };
+          }
         } catch { /* metrics may not be available */ }
 
         const fbAnalytics = { views: 0, likes: metrics.likes || 0, comments: metrics.comments || 0, shares: metrics.shares || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...fbAnalytics,
-          platform_specific: { permalink: post.permalink_url, type: post.type },
+          platform_specific: { permalink: post.permalink_url, type: attachmentType },
           fetched_at: new Date().toISOString(),
         });
-        await appendAnalyticsHistory(contentPost.id, account.id, fbAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, fbAnalytics, publishJob?.id);
 
         totalImported++;
 
@@ -2093,7 +2121,7 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
   let totalImported = 0;
   let hasMore = true;
 
-  while (hasMore && totalImported < 100000) {
+  while (hasMore && true) {
     // LinkedIn Posts API — fetch user's own posts
     const res = await fetchWithTimeout(
       `https://api.linkedin.com/rest/posts?author=${authorUrn}&q=author&count=${count}&start=${start}&sortBy=LAST_MODIFIED`,
@@ -2147,7 +2175,7 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
         if (!contentPost) continue;
 
         // Create publish job
-        await db().from("publish_jobs").insert({
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
@@ -2155,7 +2183,7 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
           status: "completed",
           platform_post_id: postId,
           completed_at: publishedAt,
-        });
+        }).select("id").single();
 
         // Fetch social actions (likes, comments, shares) for this post
         let metrics: Record<string, number> = {};
@@ -2183,6 +2211,7 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
           // Metrics may not be available
         }
 
+        const permalink = postId.startsWith("urn:li:") ? `https://www.linkedin.com/feed/update/${postId}` : null;
         const liAnalytics = {
           views: 0,
           likes: metrics.likes || 0,
@@ -2193,12 +2222,13 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...liAnalytics,
-          platform_specific: { post_urn: postId, content_type: action },
+          platform_specific: { post_urn: postId, content_type: action, permalink },
           fetched_at: new Date().toISOString(),
         });
 
-        await appendAnalyticsHistory(contentPost.id, account.id, liAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, liAnalytics, publishJob?.id);
 
         totalImported++;
 
@@ -2228,7 +2258,7 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
   let totalImported = 0;
   let hasMore = true;
 
-  while (hasMore && totalImported < 100000) {
+  while (hasMore && true) {
     const res = await fetchWithTimeout(
       "https://open.tiktokapis.com/v2/video/list/?fields=id,title,create_time,share_url,duration,like_count,comment_count,share_count,view_count",
       {
@@ -2260,7 +2290,7 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
 
         if (!contentPost) continue;
 
-        await db().from("publish_jobs").insert({
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
@@ -2268,17 +2298,18 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
           status: "completed",
           platform_post_id: video.id,
           completed_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : new Date().toISOString(),
-        });
+        }).select("id").single();
 
         const ttAnalytics = { views: video.view_count || 0, likes: video.like_count || 0, comments: video.comment_count || 0, shares: video.share_count || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...ttAnalytics,
           platform_specific: { share_url: video.share_url, duration: video.duration },
           fetched_at: new Date().toISOString(),
         });
-        await appendAnalyticsHistory(contentPost.id, account.id, ttAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, ttAnalytics, publishJob?.id);
 
         totalImported++;
       } catch (e: any) {
@@ -2338,7 +2369,7 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
 
         if (!contentPost) continue;
 
-        await db().from("publish_jobs").insert({
+        const { data: publishJob } = await db().from("publish_jobs").insert({
           post_id: contentPost.id,
           asset_id: null,
           social_account_id: account.id,
@@ -2346,17 +2377,19 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
           status: "completed",
           platform_post_id: tweet.id,
           completed_at: tweet.created_at,
-        });
+        }).select("id").single();
 
         const pm = tweet.public_metrics || {};
         const twAnalytics = { views: pm.impression_count || 0, likes: pm.like_count || 0, comments: pm.reply_count || 0, shares: (pm.retweet_count || 0) + (pm.quote_count || 0), impressions: pm.impression_count || 0 };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
+          publish_job_id: publishJob?.id || null,
           ...twAnalytics,
+          platform_specific: { permalink: `https://x.com/i/status/${tweet.id}` },
           fetched_at: new Date().toISOString(),
         });
-        await appendAnalyticsHistory(contentPost.id, account.id, twAnalytics);
+        await appendAnalyticsHistory(contentPost.id, account.id, twAnalytics, publishJob?.id);
 
         totalImported++;
       } catch (e: any) {
@@ -2369,7 +2402,7 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
     if (totalImported % 100 === 0 && totalImported > 0) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-  } while (paginationToken && totalImported < 100000);
+  } while (paginationToken && true);
 
   console.log(`[historical] Twitter import complete: ${totalImported} tweets`);
   return totalImported;
