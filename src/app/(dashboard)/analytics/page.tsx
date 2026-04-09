@@ -62,6 +62,7 @@ export default function AnalyticsPage() {
 
   const total = summary?.total;
   const bp = summary?.byPlatform || {};
+  const ba = summary?.byAccount || {};
   const daily = timeSeries?.daily || [];
   const platformComparison = timeSeries?.platformComparison || [];
   const topPosts = timeSeries?.topPosts || [];
@@ -88,11 +89,17 @@ export default function AnalyticsPage() {
     return entry;
   });
 
-  function byPlatformMetric(metric: string): Record<string, number> {
+  // Per-account metric breakdown (e.g., "instagram/@jerrylucas148": 2)
+  function byAccountMetric(metric: string): Record<string, number> {
     const result: Record<string, number> = {};
-    for (const [platform, data] of Object.entries(bp)) {
+    for (const [accountKey, data] of Object.entries(ba)) {
       const val = (data as any)?.[metric] || 0;
-      if (val > 0) result[platform] = val;
+      if (val > 0) {
+        // Convert "instagram/@jerrylucas148" to "Instagram/@jerrylucas148"
+        const [platform, ...rest] = accountKey.split("/");
+        const label = `${PLATFORM_LABELS[platform] || platform}/${rest.join("/")}`;
+        result[label] = val;
+      }
     }
     return result;
   }
@@ -174,14 +181,14 @@ export default function AnalyticsPage() {
           ))
         ) : (
           <>
-            <StatCard icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />} label="Total Posts" value={(total?.posts || 0).toLocaleString()} sub={byPlatformMetric("posts")} />
-            <StatCard icon={<Eye className="h-4 w-4 text-muted-foreground" />} label="Total Views" value={(total?.views || 0).toLocaleString()} sub={byPlatformMetric("views")} />
-            <StatCard icon={<Heart className="h-4 w-4 text-muted-foreground" />} label="Total Likes" value={(total?.likes || 0).toLocaleString()} sub={byPlatformMetric("likes")} />
-            <StatCard icon={<MessageSquare className="h-4 w-4 text-muted-foreground" />} label="Total Comments" value={(total?.comments || 0).toLocaleString()} sub={byPlatformMetric("comments")} />
-            <StatCard icon={<Share2 className="h-4 w-4 text-muted-foreground" />} label="Total Shares" value={(total?.shares || 0).toLocaleString()} sub={byPlatformMetric("shares")} />
-            <StatCard icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />} label="Impressions" value={(total?.impressions || 0).toLocaleString()} sub={byPlatformMetric("impressions")} />
-            <StatCard icon={<Users className="h-4 w-4 text-muted-foreground" />} label="Avg Engagement" value={`${total?.engagement || 0}%`} sub={Object.fromEntries(Object.entries(byPlatformMetric("engagement")).map(([k, v]) => [k, `${v}%` as any]))} />
-            <StatCard icon={<Clock className="h-4 w-4 text-muted-foreground" />} label="Avg Retention" value={`${total?.retention_rate || 0}%`} sub={Object.fromEntries(Object.entries(byPlatformMetric("retention_rate")).map(([k, v]) => [k, `${v}%` as any]))} />
+            <StatCard icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />} label="Total Posts" value={(total?.posts || 0).toLocaleString()} sub={byAccountMetric("posts")} />
+            <StatCard icon={<Eye className="h-4 w-4 text-muted-foreground" />} label="Total Views" value={(total?.views || 0).toLocaleString()} sub={byAccountMetric("views")} />
+            <StatCard icon={<Heart className="h-4 w-4 text-muted-foreground" />} label="Total Likes" value={(total?.likes || 0).toLocaleString()} sub={byAccountMetric("likes")} />
+            <StatCard icon={<MessageSquare className="h-4 w-4 text-muted-foreground" />} label="Total Comments" value={(total?.comments || 0).toLocaleString()} sub={byAccountMetric("comments")} />
+            <StatCard icon={<Share2 className="h-4 w-4 text-muted-foreground" />} label="Total Shares" value={(total?.shares || 0).toLocaleString()} sub={byAccountMetric("shares")} />
+            <StatCard icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />} label="Impressions" value={(total?.impressions || 0).toLocaleString()} sub={byAccountMetric("impressions")} />
+            <StatCard icon={<Users className="h-4 w-4 text-muted-foreground" />} label="Avg Engagement" value={`${total?.engagement || 0}%`} sub={Object.fromEntries(Object.entries(byAccountMetric("engagement")).map(([k, v]) => [k, `${v}%` as any]))} />
+            <StatCard icon={<Clock className="h-4 w-4 text-muted-foreground" />} label="Avg Retention" value={`${total?.retention_rate || 0}%`} sub={Object.fromEntries(Object.entries(byAccountMetric("retention_rate")).map(([k, v]) => [k, `${v}%` as any]))} />
           </>
         )}
       </div>

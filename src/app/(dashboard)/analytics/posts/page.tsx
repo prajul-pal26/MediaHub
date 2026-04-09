@@ -246,14 +246,16 @@ export default function PostAnalyticsPage() {
   const total = summary?.total;
   const bp = summary?.byPlatform || {};
 
-  // Helper to extract a metric per platform
-  function byPlatformMetric(metric: string): Record<string, number> {
+  // Helper to extract a metric per account (platform/@username)
+  function byAccountMetric(metric: string): Record<string, number> {
     const result: Record<string, number> = {};
-    for (const [platform, data] of Object.entries(bp)) {
-      const val = (data as any)?.[metric] || 0;
-      if (val > 0) result[platform] = val;
+    for (const post of posts) {
+      const key = `${platformLabels[post.platform] || post.platform}/@${post.account_name}`;
+      const val = (post as any)?.[metric] || 0;
+      result[key] = (result[key] || 0) + val;
     }
-    return result;
+    // Only include non-zero values
+    return Object.fromEntries(Object.entries(result).filter(([, v]) => v > 0));
   }
 
   return (
@@ -293,51 +295,51 @@ export default function PostAnalyticsPage() {
               icon={<Eye className="h-4 w-4 text-muted-foreground" />}
               label="Total Views"
               total={total?.views || 0}
-              byPlatform={byPlatformMetric("views")}
+              byPlatform={byAccountMetric("views")}
             />
             <StatCard
               icon={<Heart className="h-4 w-4 text-muted-foreground" />}
               label="Total Likes"
               total={total?.likes || 0}
-              byPlatform={byPlatformMetric("likes")}
+              byPlatform={byAccountMetric("likes")}
             />
             <StatCard
               icon={<MessageSquare className="h-4 w-4 text-muted-foreground" />}
               label="Total Comments"
               total={total?.comments || 0}
-              byPlatform={byPlatformMetric("comments")}
+              byPlatform={byAccountMetric("comments")}
             />
             <StatCard
               icon={<Share2 className="h-4 w-4 text-muted-foreground" />}
               label="Total Shares"
               total={total?.shares || 0}
-              byPlatform={byPlatformMetric("shares")}
+              byPlatform={byAccountMetric("shares")}
             />
             <StatCard
               icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />}
               label="Impressions"
               total={total?.impressions || 0}
-              byPlatform={byPlatformMetric("impressions")}
+              byPlatform={byAccountMetric("impressions")}
             />
             <StatCard
               icon={<Users className="h-4 w-4 text-muted-foreground" />}
               label="Avg Engagement"
               total={total?.engagement || 0}
-              byPlatform={byPlatformMetric("engagement")}
+              byPlatform={byAccountMetric("engagement_rate")}
               format={(n) => `${n}%`}
             />
             <StatCard
               icon={<Clock className="h-4 w-4 text-muted-foreground" />}
               label="Avg Retention"
               total={total?.retention_rate || 0}
-              byPlatform={byPlatformMetric("retention_rate")}
+              byPlatform={byAccountMetric("retention_rate")}
               format={(n) => `${n}%`}
             />
             <StatCard
               icon={<MousePointer className="h-4 w-4 text-muted-foreground" />}
               label="Total Clicks"
               total={total?.clicks || 0}
-              byPlatform={byPlatformMetric("clicks")}
+              byPlatform={byAccountMetric("clicks")}
             />
           </>
         )}
@@ -421,20 +423,23 @@ export default function PostAnalyticsPage() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="secondary" className={`text-xs ${platformColors[post.platform] || ""}`}>
-                            {post.platform}
-                          </Badge>
+                          <div>
+                            <Badge variant="secondary" className={`text-xs ${platformColors[post.platform] || ""}`}>
+                              {platformLabels[post.platform] || post.platform}
+                            </Badge>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">@{post.account_name}</p>
+                          </div>
                         </TableCell>
                         <TableCell>
                           <span className="text-xs text-muted-foreground">
                             {sourceLabels[post.source] || post.source}
                           </span>
                         </TableCell>
-                        <TableCell className="text-right font-medium">{post.views.toLocaleString()}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">{post.impressions.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-medium">{post.views > 0 ? post.views.toLocaleString() : <span className="text-muted-foreground">—</span>}</TableCell>
+                        <TableCell className="text-right text-muted-foreground">{post.impressions > 0 ? post.impressions.toLocaleString() : "—"}</TableCell>
                         <TableCell className="text-right">{post.likes.toLocaleString()}</TableCell>
                         <TableCell className="text-right">{post.comments.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">{post.shares.toLocaleString()}</TableCell>
+                        <TableCell className="text-right">{post.shares > 0 ? post.shares.toLocaleString() : <span className="text-muted-foreground">—</span>}</TableCell>
                         <TableCell className="text-right">
                           {post.retention_rate > 0 ? (
                             <span className="text-xs">{post.retention_rate}%</span>

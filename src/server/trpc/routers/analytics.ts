@@ -1211,10 +1211,16 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
 
       // Group by platform
       const platformMap: Record<string, any[]> = {};
+      // Group by account (platform/@username)
+      const accountMap: Record<string, any[]> = {};
       for (const a of rows) {
         const platform = a.platform || "unknown";
         if (!platformMap[platform]) platformMap[platform] = [];
         platformMap[platform].push(a);
+
+        const accountKey = `${platform}/@${a.platform_username || "unknown"}`;
+        if (!accountMap[accountKey]) accountMap[accountKey] = [];
+        accountMap[accountKey].push(a);
       }
 
       function aggregate(items: any[]) {
@@ -1250,8 +1256,12 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       for (const [platform, items] of Object.entries(platformMap)) {
         byPlatform[platform] = aggregate(items);
       }
+      const byAccount: Record<string, ReturnType<typeof aggregate>> = {};
+      for (const [accountKey, items] of Object.entries(accountMap)) {
+        byAccount[accountKey] = aggregate(items);
+      }
 
-      return { total, byPlatform };
+      return { total, byPlatform, byAccount };
     }),
 
   // ━━━ Export Data (aggregated for CSV/PDF) ━━━
