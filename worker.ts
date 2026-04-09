@@ -1421,32 +1421,45 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
   if (!encryptedPageToken) return null;
   const pageToken = decrypt(encryptedPageToken);
 
-  // Get basic metrics
+  // Facebook requires pageId_postId format for the Graph API
+  const pageId = account.platform_user_id || account.platform_metadata?.page_id;
+  const fullPostId = platformPostId.includes("_") ? platformPostId : `${pageId}_${platformPostId}`;
+
+  // Get basic metrics using edges with summary (this always works)
   const postRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${platformPostId}?fields=shares,reactions.summary(true),comments.summary(true)&access_token=${pageToken}`
+    `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares&access_token=${pageToken}`
   );
   const postData = await postRes.json();
-  if (postData.error) return null;
-
-  // Try to get insights
-  let impressions = 0;
-  let reach = 0;
-  try {
-    const insightsRes = await fetchWithTimeout(
-      `https://graph.facebook.com/v19.0/${platformPostId}/insights?metric=post_impressions,post_reach,post_engaged_users&access_token=${pageToken}`
-    );
-    const insightsData = await insightsRes.json();
-    const metrics = insightsData.data || [];
-    const getMetric = (name: string) => metrics.find((i: any) => i.name === name)?.values?.[0]?.value || 0;
-    impressions = getMetric("post_impressions");
-    reach = getMetric("post_reach");
-  } catch {
-    // Insights may not be available for all post types
+  if (postData.error) {
+    console.error(`[analytics] FB post fetch error for ${fullPostId}:`, postData.error.message);
+    return null;
   }
 
   const shares = postData.shares?.count || 0;
   const reactions = postData.reactions?.summary?.total_count || 0;
   const comments = postData.comments?.summary?.total_count || 0;
+
+  // Try to get insights (requires page with 100+ likes)
+  let impressions = 0;
+  let reach = 0;
+  try {
+    const insightsRes = await fetchWithTimeout(
+      `https://graph.facebook.com/v19.0/${fullPostId}/insights?metric=post_reactions_like_total&period=lifetime&access_token=${pageToken}`
+    );
+    const insightsData = await insightsRes.json();
+    if (insightsData.data && insightsData.data.length > 0) {
+      // If insights work, also fetch impressions/reach
+      const fullInsightsRes = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${fullPostId}/insights?metric=post_impressions,post_impressions_unique&period=lifetime&access_token=${pageToken}`
+      );
+      const fullInsights = await fullInsightsRes.json();
+      const getMetric = (name: string) => (fullInsights.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+      impressions = getMetric("post_impressions");
+      reach = getMetric("post_impressions_unique");
+    }
+  } catch {
+    // Insights require page with 100+ likes — fall back to basic metrics only
+  }
 
   return {
     views: impressions || 0,
@@ -1455,7 +1468,7 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
     shares,
     reach,
     impressions,
-    engagement_rate: impressions > 0
+    engagement_rate: reactions + comments + shares > 0 && impressions > 0
       ? Math.round((reactions + comments + shares) / impressions * 10000) / 100
       : 0,
   };
