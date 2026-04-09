@@ -958,20 +958,23 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       let brandId: string;
       let publishJobId: string | null = null;
       let contentPostId: string;
+      let publishedAt: string | null = null;
 
       if (job) {
-        const post = job.content_posts as any;
-        brandId = post.brand_id;
+        const contentPost = job.content_posts as any;
+        brandId = contentPost.brand_id;
+        publishedAt = contentPost.published_at;
         publishJobId = job.id;
         contentPostId = job.post_id;
       } else {
         const { data: post } = await db
           .from("content_posts")
-          .select("id, brand_id")
+          .select("id, brand_id, published_at")
           .eq("id", input.postId)
           .single();
         if (!post) throw new TRPCError({ code: "NOT_FOUND", message: "Post not found" });
         brandId = post.brand_id;
+        publishedAt = post.published_at;
         contentPostId = post.id;
       }
 
@@ -1027,7 +1030,7 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
       return {
         snapshots,
         latest: latest || null,
-        publishedAt: post.published_at,
+        publishedAt,
         totalSnapshots: snapshots.length,
         growth,
       };
