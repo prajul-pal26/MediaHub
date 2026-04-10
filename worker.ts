@@ -1268,19 +1268,21 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
   // Fetch real retention data from YouTube Analytics API
   let avgViewDuration = 0;
   let watchTimeMinutes = 0;
+  let shares = 0;
   try {
     const youtubeAnalytics = google.youtubeAnalytics({ version: "v2", auth: oauth2 });
     const analyticsRes = await youtubeAnalytics.reports.query({
       ids: "channel==MINE",
       startDate: "2020-01-01",
       endDate: new Date().toISOString().split("T")[0],
-      metrics: "estimatedMinutesWatched,averageViewDuration",
+      metrics: "estimatedMinutesWatched,averageViewDuration,shares",
       filters: `video==${platformPostId}`,
     });
     const row = analyticsRes.data.rows?.[0];
     if (row) {
       watchTimeMinutes = row[0] as number || 0;
       avgViewDuration = row[1] as number || 0;
+      shares = row[2] as number || 0;
     }
   } catch (e: any) {
     console.warn(`[analytics] YouTube Analytics API failed for ${platformPostId}: ${e.message}`);
@@ -1293,15 +1295,22 @@ async function fetchYouTubeAnalytics(account: any, platformPostId: string, orgId
     ? Math.round((avgViewDuration / totalSeconds) * 10000) / 100
     : 0;
 
+  const likes = parseInt(stats.likeCount || "0");
+  const commentsCount = parseInt(stats.commentCount || "0");
+  const engagementRate = views > 0
+    ? Math.round((likes + commentsCount + shares) / views * 10000) / 100
+    : 0;
+
   return {
     views,
-    likes: parseInt(stats.likeCount || "0"),
-    comments: parseInt(stats.commentCount || "0"),
-    shares: 0,
+    likes,
+    comments: commentsCount,
+    shares,
     impressions: views,
     watch_time_seconds: Math.round(watchTimeMinutes * 60),
     avg_view_duration_seconds: Math.round(avgViewDuration),
     retention_rate: retentionRate,
+    engagement_rate: engagementRate,
     platform_specific: { permalink: `https://www.youtube.com/watch?v=${platformPostId}` },
   };
 }
@@ -1458,9 +1467,9 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
   const pageId = account.platform_user_id || account.platform_metadata?.page_id;
   const fullPostId = platformPostId.includes("_") ? platformPostId : `${pageId}_${platformPostId}`;
 
-  // Get basic metrics + permalink using edges with summary (this always works)
+  // Step 1: Get basic metrics + video attachment ID + permalink
   const postRes = await fetchWithTimeout(
-    `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares,permalink_url&access_token=${pageToken}`
+    `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares,permalink_url,attachments{target{id},type}&access_token=${pageToken}`
   );
   const postData = await postRes.json();
   if (postData.error) {
@@ -1472,39 +1481,60 @@ async function fetchFacebookAnalytics(account: any, platformPostId: string) {
   const reactions = postData.reactions?.summary?.total_count || 0;
   const comments = postData.comments?.summary?.total_count || 0;
 
-  // Try to get insights (requires page with 100+ likes)
-  let impressions = 0;
+  // Step 2: Try video_insights if post has a video attachment (reels/videos)
+  let views = 0;
   let reach = 0;
-  try {
-    const insightsRes = await fetchWithTimeout(
-      `https://graph.facebook.com/v19.0/${fullPostId}/insights?metric=post_reactions_like_total&period=lifetime&access_token=${pageToken}`
-    );
-    const insightsData = await insightsRes.json();
-    if (insightsData.data && insightsData.data.length > 0) {
-      // If insights work, also fetch impressions/reach
-      const fullInsightsRes = await fetchWithTimeout(
-        `https://graph.facebook.com/v19.0/${fullPostId}/insights?metric=post_impressions,post_impressions_unique&period=lifetime&access_token=${pageToken}`
+  let avgWatchTimeMs = 0;
+  let totalWatchTimeMs = 0;
+
+  const videoId = postData.attachments?.data?.[0]?.target?.id;
+  if (videoId) {
+    try {
+      // Reels metrics (work for FB reels)
+      const reelsRes = await fetchWithTimeout(
+        `https://graph.facebook.com/v19.0/${videoId}/video_insights?metric=fb_reels_total_plays,post_impressions_unique,post_video_avg_time_watched,post_video_view_time&period=lifetime&access_token=${pageToken}`
       );
-      const fullInsights = await fullInsightsRes.json();
-      const getMetric = (name: string) => (fullInsights.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
-      impressions = getMetric("post_impressions");
-      reach = getMetric("post_impressions_unique");
+      const reelsData = await reelsRes.json();
+      if (!reelsData.error && reelsData.data && reelsData.data.length > 0) {
+        const getMetric = (name: string) => (reelsData.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+        views = getMetric("fb_reels_total_plays");
+        reach = getMetric("post_impressions_unique");
+        avgWatchTimeMs = getMetric("post_video_avg_time_watched");
+        totalWatchTimeMs = getMetric("post_video_view_time");
+      }
+
+      // If reels metrics didn't return views, try standard video metrics
+      if (views === 0) {
+        const stdRes = await fetchWithTimeout(
+          `https://graph.facebook.com/v19.0/${videoId}/video_insights?metric=total_video_views,total_video_impressions_unique,total_video_avg_time_watched&period=lifetime&access_token=${pageToken}`
+        );
+        const stdData = await stdRes.json();
+        if (!stdData.error && stdData.data && stdData.data.length > 0) {
+          const getMetric = (name: string) => (stdData.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+          views = views || getMetric("total_video_views");
+          reach = reach || getMetric("total_video_impressions_unique");
+          avgWatchTimeMs = avgWatchTimeMs || getMetric("total_video_avg_time_watched");
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[analytics] FB video_insights failed for ${videoId}:`, e.message);
     }
-  } catch {
-    // Insights require page with 100+ likes — fall back to basic metrics only
   }
 
+  const engageDenominator = reach || views || 0;
+
   return {
-    views: impressions || 0,
+    views,
     likes: reactions,
     comments,
     shares,
     reach,
-    impressions,
-    engagement_rate: reactions + comments + shares > 0 && impressions > 0
-      ? Math.round((reactions + comments + shares) / impressions * 10000) / 100
+    impressions: 0, // Facebook deprecated post_impressions — show —
+    watch_time_seconds: avgWatchTimeMs > 0 ? Math.round(avgWatchTimeMs / 1000) : 0,
+    engagement_rate: engageDenominator > 0
+      ? Math.round((reactions + comments + shares) / engageDenominator * 10000) / 100
       : 0,
-    platform_specific: { permalink: postData.permalink_url || null },
+    platform_specific: { permalink: postData.permalink_url || null, video_id: videoId || null },
   };
 }
 
@@ -1955,6 +1985,10 @@ async function importYouTubeHistory(account: any, brandId: string, orgId: string
           status: "published",
           published_at: snippet.publishedAt,
           source: "api",
+          caption_overrides: {
+            caption: snippet.title || snippet.description || "",
+            permalink: `https://www.youtube.com/watch?v=${video.id}`,
+          },
         }).select().single();
 
         if (!contentPost) continue;
@@ -2023,7 +2057,7 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
 
   console.log(`[historical] Importing Facebook history for page ${account.platform_username}...`);
 
-  let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,permalink_url,attachments{type,media_type}&limit=50&access_token=${pageToken}`;
+  let url: string | null = `https://graph.facebook.com/v19.0/${pageId}/feed?fields=id,message,created_time,permalink_url,attachments{target{id},type,media_type}&limit=50&access_token=${pageToken}`;
   let totalImported = 0;
 
   while (url) {
@@ -2043,6 +2077,10 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
           status: "published",
           published_at: post.created_time,
           source: "api",
+          caption_overrides: {
+            caption: post.message || "",
+            permalink: post.permalink_url || "",
+          },
         }).select().single();
 
         if (!contentPost) continue;
@@ -2063,29 +2101,71 @@ async function importFacebookHistory(account: any, brandId: string, _orgId: stri
         }).select("id").single();
 
         // Fetch basic metrics using pageId_postId format
-        let metrics: Record<string, number> = {};
+        let likes = 0, comments = 0, shares = 0;
         try {
           const metricsRes = await fetchWithTimeout(
-            `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares,permalink_url&access_token=${pageToken}`,
+            `https://graph.facebook.com/v19.0/${fullPostId}?fields=reactions.summary(true).limit(0),comments.summary(true).limit(0),shares&access_token=${pageToken}`,
             {}, 10000
           );
           const metricsData = await metricsRes.json();
           if (!metricsData.error) {
-            metrics = {
-              likes: metricsData.reactions?.summary?.total_count || 0,
-              comments: metricsData.comments?.summary?.total_count || 0,
-              shares: metricsData.shares?.count || 0,
-            };
+            likes = metricsData.reactions?.summary?.total_count || 0;
+            comments = metricsData.comments?.summary?.total_count || 0;
+            shares = metricsData.shares?.count || 0;
           }
         } catch { /* metrics may not be available */ }
 
-        const fbAnalytics = { views: 0, likes: metrics.likes || 0, comments: metrics.comments || 0, shares: metrics.shares || 0 };
+        // Fetch video_insights if post has a video attachment
+        let views = 0, reach = 0, avgWatchTimeMs = 0;
+        const videoId = post.attachments?.data?.[0]?.target?.id;
+        if (videoId) {
+          try {
+            const vidRes = await fetchWithTimeout(
+              `https://graph.facebook.com/v19.0/${videoId}/video_insights?metric=fb_reels_total_plays,post_impressions_unique,post_video_avg_time_watched&period=lifetime&access_token=${pageToken}`,
+              {}, 10000
+            );
+            const vidData = await vidRes.json();
+            if (!vidData.error && vidData.data && vidData.data.length > 0) {
+              const getMetric = (name: string) => (vidData.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+              views = getMetric("fb_reels_total_plays");
+              reach = getMetric("post_impressions_unique");
+              avgWatchTimeMs = getMetric("post_video_avg_time_watched");
+            }
+            // Fallback to standard video metrics
+            if (views === 0) {
+              const stdRes = await fetchWithTimeout(
+                `https://graph.facebook.com/v19.0/${videoId}/video_insights?metric=total_video_views,total_video_impressions_unique&period=lifetime&access_token=${pageToken}`,
+                {}, 10000
+              );
+              const stdData = await stdRes.json();
+              if (!stdData.error && stdData.data && stdData.data.length > 0) {
+                const getM = (name: string) => (stdData.data || []).find((i: any) => i.name === name)?.values?.[0]?.value || 0;
+                views = views || getM("total_video_views");
+                reach = reach || getM("total_video_impressions_unique");
+              }
+            }
+          } catch { /* video insights may not be available */ }
+        }
+
+        const engageDenominator = reach || views || 0;
+        const fbAnalytics = {
+          views,
+          likes,
+          comments,
+          shares,
+          reach,
+          impressions: 0,
+          watch_time_seconds: avgWatchTimeMs > 0 ? Math.round(avgWatchTimeMs / 1000) : 0,
+          engagement_rate: engageDenominator > 0
+            ? Math.round((likes + comments + shares) / engageDenominator * 10000) / 100
+            : 0,
+        };
         await db().from("post_analytics").insert({
           post_id: contentPost.id,
           social_account_id: account.id,
           publish_job_id: publishJob?.id || null,
           ...fbAnalytics,
-          platform_specific: { permalink: post.permalink_url, type: attachmentType },
+          platform_specific: { permalink: post.permalink_url, type: attachmentType, video_id: videoId },
           fetched_at: new Date().toISOString(),
         });
         await appendAnalyticsHistory(contentPost.id, account.id, fbAnalytics, publishJob?.id);
@@ -2164,12 +2244,17 @@ async function importLinkedInHistory(account: any, brandId: string, _orgId: stri
         const action = hasArticle ? "li_article" : "li_post";
 
         // Create content post
+        const liPermalink = postId.startsWith("urn:li:") ? `https://www.linkedin.com/feed/update/${postId}` : "";
         const { data: contentPost } = await db().from("content_posts").insert({
           group_id: null,
           brand_id: brandId,
           status: "published",
           published_at: publishedAt,
           source: "api",
+          caption_overrides: {
+            caption: post.commentary || post.specificContent?.["com.linkedin.ugc.ShareContent"]?.shareCommentary?.text || "",
+            permalink: liPermalink,
+          },
         }).select().single();
 
         if (!contentPost) continue;
@@ -2286,6 +2371,10 @@ async function importTikTokHistory(account: any, brandId: string, _orgId: string
           status: "published",
           published_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : new Date().toISOString(),
           source: "api",
+          caption_overrides: {
+            caption: video.title || "",
+            permalink: video.share_url || "",
+          },
         }).select().single();
 
         if (!contentPost) continue;
@@ -2365,6 +2454,10 @@ async function importTwitterHistory(account: any, brandId: string, _orgId: strin
           status: "published",
           published_at: tweet.created_at,
           source: "api",
+          caption_overrides: {
+            caption: tweet.text || "",
+            permalink: `https://x.com/i/status/${tweet.id}`,
+          },
         }).select().single();
 
         if (!contentPost) continue;

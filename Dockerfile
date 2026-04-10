@@ -34,7 +34,7 @@ ENV NEXT_PUBLIC_SUPABASE_URL=http://localhost:54321
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
 ENV NEXT_PUBLIC_APP_URL=https://localhost:3443
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV NODE_OPTIONS=--max-old-space-size=2048
+ENV NODE_OPTIONS=--max-old-space-size=1024
 
 # Cache .next/cache between builds for faster incremental compilation
 RUN --mount=type=cache,target=/app/.next/cache \

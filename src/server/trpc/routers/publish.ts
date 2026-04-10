@@ -72,15 +72,16 @@ export const publishRouter = router({
   getValidActions: protectedProcedure
     .input(z.object({ assetId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
-      const { db } = ctx;
+      const { db, profile } = ctx;
 
       const { data: asset } = await db
         .from("media_assets")
-        .select("*, group:media_groups(variant_count)")
+        .select("*, group:media_groups(variant_count, brand_id)")
         .eq("id", input.assetId)
         .single();
 
       if (!asset) throw new TRPCError({ code: "NOT_FOUND" });
+      if (asset.group?.brand_id) assertBrandAccess(profile, asset.group.brand_id);
 
       return getValidActions(asset, asset.group?.variant_count || 1);
     }),

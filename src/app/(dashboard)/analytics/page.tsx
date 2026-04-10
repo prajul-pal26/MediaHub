@@ -9,11 +9,11 @@ import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
 import {
   BarChart3, Brain, Heart, Users, Eye, MessageSquare,
-  Share2, TrendingUp, MousePointer, Clock, Loader2, ArrowUpRight, ArrowDownRight, RefreshCw,
+  Share2, TrendingUp, MousePointer, Clock, Timer, Loader2, ArrowUpRight, ArrowDownRight, RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  AreaChart, Area, BarChart, Bar, LineChart, Line,
+  BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell,
 } from "recharts";
 
@@ -23,8 +23,14 @@ const PLATFORM_LABELS: Record<string, string> = {
 };
 
 const PLATFORM_COLORS: Record<string, string> = {
-  instagram: "#E1306C", youtube: "#FF0000", linkedin: "#0A66C2",
+  instagram: "#C13584", youtube: "#FF0000", linkedin: "#0A66C2",
   facebook: "#1877F2", tiktok: "#010101", twitter: "#1DA1F2", snapchat: "#FFFC00", unknown: "#94a3b8",
+};
+
+// Distinct chart colors — optimized for readability on white/dark backgrounds
+const CHART_COLORS: Record<string, string> = {
+  instagram: "#C13584", youtube: "#FF4444", linkedin: "#0077B5",
+  facebook: "#1877F2", tiktok: "#25F4EE", twitter: "#1DA1F2", snapchat: "#F7D800", unknown: "#94a3b8",
 };
 
 type Period = "7d" | "30d" | "90d";
@@ -89,38 +95,52 @@ export default function AnalyticsPage() {
     return entry;
   });
 
-  // Per-account metric breakdown (e.g., "instagram/@jerrylucas148": 2)
-  // Metrics that are NEVER available for certain platforms
-  const metricUnavailable: Record<string, string[]> = {
-    saves: ["facebook", "linkedin", "youtube", "tiktok", "twitter"],
-    reach: ["youtube"],
-  };
+  function formatWatchTime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${Math.round(seconds / 3600 * 10) / 10}h`;
+  }
 
-  function byAccountMetric(metric: string): Record<string, number> {
-    const result: Record<string, number> = {};
+  // Per-account metric breakdown with optional platform filter, value filter, and formatter
+  function byAccountMetric(metric: string, opts?: { format?: (n: number) => string; skipZero?: boolean; platforms?: string[] }): Record<string, string> {
+    const result: Record<string, string> = {};
+    const fmt = opts?.format || ((n: number) => n.toLocaleString());
     for (const [accountKey, data] of Object.entries(ba)) {
       const platform = accountKey.split("/")[0];
 
-      // Skip accounts where this metric can never exist
-      const checkMetric = metric === "_views_impressions" ? null : metric;
-      if (checkMetric && metricUnavailable[checkMetric]?.includes(platform)) continue;
+      // Only include specific platforms if requested
+      if (opts?.platforms && !opts.platforms.includes(platform)) continue;
 
-      let val: number;
-      if (metric === "_views_impressions") {
-        val = ((data as any)?.views || 0) + ((data as any)?.impressions || 0);
-      } else {
-        val = (data as any)?.[metric] || 0;
-      }
+      const val: number = (data as any)?.[metric] || 0;
+
+      // Skip accounts with 0 for this metric if requested
+      if (opts?.skipZero && val <= 0) continue;
 
       const [plat, ...rest] = accountKey.split("/");
       const label = `${PLATFORM_LABELS[plat] || plat}/${rest.join("/")}`;
-      result[label] = val;
+      result[label] = fmt(val);
     }
     return result;
   }
 
+  // Compute a filtered total for a metric across specific platforms
+  function filteredTotal(metric: string, platforms: string[], mode: "sum" | "avg" = "sum"): number {
+    const vals: number[] = [];
+    for (const [accountKey, data] of Object.entries(ba)) {
+      const platform = accountKey.split("/")[0];
+      if (!platforms.includes(platform)) continue;
+      const val = (data as any)?.[metric] || 0;
+      if (mode === "avg" && val <= 0) continue;
+      vals.push(val);
+    }
+    if (vals.length === 0) return 0;
+    return mode === "sum"
+      ? vals.reduce((s, v) => s + v, 0)
+      : Math.round(vals.reduce((s, v) => s + v, 0) / vals.length * 100) / 100;
+  }
+
   function StatCard({ icon, label, value, sub }: {
-    icon: React.ReactNode; label: string; value: string; sub?: Record<string, number>;
+    icon: React.ReactNode; label: string; value: string; sub?: Record<string, string>;
   }) {
     return (
       <Card>
@@ -135,7 +155,7 @@ export default function AnalyticsPage() {
               {Object.entries(sub).map(([p, v]) => (
                 <div key={p} className="flex justify-between text-[11px]">
                   <span className="text-muted-foreground">{PLATFORM_LABELS[p] || p}</span>
-                  <span className="font-medium">{typeof v === "number" ? v.toLocaleString() : v}</span>
+                  <span className="font-medium">{v}</span>
                 </div>
               ))}
             </div>
@@ -194,18 +214,70 @@ export default function AnalyticsPage() {
           Array.from({ length: 8 }).map((_, i) => (
             <Card key={i}><CardContent className="pt-4 pb-3"><div className="h-7 w-16 bg-muted animate-pulse rounded mb-1" /><div className="h-4 w-20 bg-muted animate-pulse rounded" /></CardContent></Card>
           ))
-        ) : (
-          <>
-            <StatCard icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />} label="Total Posts" value={(total?.posts || 0).toLocaleString()} sub={byAccountMetric("posts")} />
-            <StatCard icon={<Eye className="h-4 w-4 text-muted-foreground" />} label="Views / Impressions" value={((total?.views || 0) + (total?.impressions || 0)).toLocaleString()} sub={byAccountMetric("_views_impressions")} />
-            <StatCard icon={<Users className="h-4 w-4 text-muted-foreground" />} label="Reach" value={(total?.reach || 0).toLocaleString()} sub={byAccountMetric("reach")} />
-            <StatCard icon={<Heart className="h-4 w-4 text-muted-foreground" />} label="Total Likes" value={(total?.likes || 0).toLocaleString()} sub={byAccountMetric("likes")} />
-            <StatCard icon={<MessageSquare className="h-4 w-4 text-muted-foreground" />} label="Total Comments" value={(total?.comments || 0).toLocaleString()} sub={byAccountMetric("comments")} />
-            <StatCard icon={<Share2 className="h-4 w-4 text-muted-foreground" />} label="Total Shares" value={(total?.shares || 0).toLocaleString()} sub={byAccountMetric("shares")} />
-            <StatCard icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />} label="Total Saves" value={(total?.saves || 0).toLocaleString()} sub={byAccountMetric("saves")} />
-            <StatCard icon={<MousePointer className="h-4 w-4 text-muted-foreground" />} label="Avg Engagement" value={`${total?.engagement || 0}%`} sub={Object.fromEntries(Object.entries(byAccountMetric("engagement")).map(([k, v]) => [k, `${v}%` as any]))} />
-          </>
-        )}
+        ) : (() => {
+          // Build cards dynamically — only show cards that have data
+          const fmtNum = (n: number) => n.toLocaleString();
+          const fmtPct = (n: number) => `${n}%`;
+          const fmtTime = (n: number) => n > 0 ? formatWatchTime(n) : "—";
+
+          const cards: { icon: React.ReactNode; label: string; value: string; sub: Record<string, string> }[] = [
+            { icon: <BarChart3 className="h-4 w-4 text-muted-foreground" />, label: "Total Posts", value: fmtNum(total?.posts || 0), sub: byAccountMetric("posts") },
+            { icon: <Eye className="h-4 w-4 text-muted-foreground" />, label: "Total Views", value: fmtNum(total?.views || 0), sub: byAccountMetric("views") },
+          ];
+
+          // Reach — only if any account has reach > 0 (IG, FB have it; YT doesn't)
+          const reachSub = byAccountMetric("reach", { skipZero: true });
+          if (Object.keys(reachSub).length > 0) {
+            cards.push({ icon: <Users className="h-4 w-4 text-muted-foreground" />, label: "Total Reach", value: fmtNum(total?.reach || 0), sub: reachSub });
+          }
+
+          cards.push(
+            { icon: <Heart className="h-4 w-4 text-muted-foreground" />, label: "Total Likes", value: fmtNum(total?.likes || 0), sub: byAccountMetric("likes") },
+            { icon: <MessageSquare className="h-4 w-4 text-muted-foreground" />, label: "Total Comments", value: fmtNum(total?.comments || 0), sub: byAccountMetric("comments") },
+            { icon: <Share2 className="h-4 w-4 text-muted-foreground" />, label: "Total Shares", value: fmtNum(total?.shares || 0), sub: byAccountMetric("shares") },
+          );
+
+          // Saves — only platforms that track saves (Instagram)
+          const savesSub = byAccountMetric("saves", { skipZero: true });
+          if (Object.keys(savesSub).length > 0) {
+            cards.push({ icon: <TrendingUp className="h-4 w-4 text-muted-foreground" />, label: "Total Saves", value: fmtNum(total?.saves || 0), sub: savesSub });
+          }
+
+          // Watch Time — YouTube only (sum of estimatedMinutesWatched per video)
+          const ytPlatforms = ["youtube"];
+          const wtSub = byAccountMetric("watch_time_seconds", { format: fmtTime, skipZero: true, platforms: ytPlatforms });
+          if (Object.keys(wtSub).length > 0) {
+            const ytWatchTotal = filteredTotal("watch_time_seconds", ytPlatforms, "sum");
+            cards.push({ icon: <Clock className="h-4 w-4 text-muted-foreground" />, label: "Watch Time", value: fmtTime(ytWatchTotal), sub: wtSub });
+          }
+
+          // Avg Watch Time — IG/FB only (per-reel/video average)
+          const igFbPlatforms = ["instagram", "facebook"];
+          const avgWtSub = byAccountMetric("avg_watch_time_seconds", { format: fmtTime, skipZero: true, platforms: igFbPlatforms });
+          if (Object.keys(avgWtSub).length > 0) {
+            const avgWtTotal = filteredTotal("avg_watch_time_seconds", igFbPlatforms, "avg");
+            cards.push({ icon: <Clock className="h-4 w-4 text-muted-foreground" />, label: "Avg Watch Time", value: fmtTime(avgWtTotal), sub: avgWtSub });
+          }
+
+          // Avg Duration — YouTube only (averageViewDuration)
+          const durSub = byAccountMetric("avg_view_duration_seconds", { format: fmtTime, skipZero: true, platforms: ytPlatforms });
+          if (Object.keys(durSub).length > 0) {
+            const durTotal = filteredTotal("avg_view_duration_seconds", ytPlatforms, "avg");
+            cards.push({ icon: <Timer className="h-4 w-4 text-muted-foreground" />, label: "Avg Duration", value: fmtTime(durTotal), sub: durSub });
+          }
+
+          // Avg Retention — YouTube only
+          const retSub = byAccountMetric("retention_rate", { format: fmtPct, skipZero: true, platforms: ytPlatforms });
+          if (Object.keys(retSub).length > 0) {
+            const retTotal = filteredTotal("retention_rate", ytPlatforms, "avg");
+            cards.push({ icon: <Eye className="h-4 w-4 text-muted-foreground" />, label: "Avg Retention", value: retTotal > 0 ? fmtPct(retTotal) : "—", sub: retSub });
+          }
+
+          // Avg Engagement — always show
+          cards.push({ icon: <MousePointer className="h-4 w-4 text-muted-foreground" />, label: "Avg Engagement", value: fmtPct(total?.engagement || 0), sub: byAccountMetric("engagement", { format: fmtPct }) });
+
+          return cards.map((c, i) => <StatCard key={i} {...c} />);
+        })()}
       </div>
 
       {/* Views Growth Chart */}
@@ -220,33 +292,32 @@ export default function AnalyticsPage() {
             <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">No time-series data yet. Data is collected every 6 hours.</div>
           ) : (
             <ResponsiveContainer width="100%" height={300}>
-              <AreaChart data={chartDaily}>
-                <defs>
-                  {activePlatforms.map(p => (
-                    <linearGradient key={p} id={`grad_${p}`} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={PLATFORM_COLORS[p] || "#8884d8"} stopOpacity={0.3} />
-                      <stop offset="95%" stopColor={PLATFORM_COLORS[p] || "#8884d8"} stopOpacity={0} />
-                    </linearGradient>
-                  ))}
-                </defs>
+              <LineChart data={chartDaily}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
+                <YAxis
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={(v: number) => {
+                    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+                    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
+                    return String(v);
+                  }}
+                />
                 <Tooltip content={<CustomTooltip />} />
                 <Legend />
                 {activePlatforms.map(p => (
-                  <Area
+                  <Line
                     key={p}
                     type="monotone"
                     dataKey={`${p}_views`}
                     name={PLATFORM_LABELS[p] || p}
-                    stroke={PLATFORM_COLORS[p] || "#8884d8"}
-                    fill={`url(#grad_${p})`}
-                    strokeWidth={2}
-                    stackId="views"
+                    stroke={CHART_COLORS[p] || "#8884d8"}
+                    strokeWidth={2.5}
+                    dot={{ r: 4, fill: CHART_COLORS[p] || "#8884d8" }}
+                    activeDot={{ r: 6 }}
                   />
                 ))}
-              </AreaChart>
+              </LineChart>
             </ResponsiveContainer>
           )}
         </CardContent>
@@ -345,8 +416,8 @@ export default function AnalyticsPage() {
                     type="monotone"
                     dataKey={`${p}_engagement`}
                     name={`${PLATFORM_LABELS[p] || p} Engagement`}
-                    stroke={PLATFORM_COLORS[p] || "#8884d8"}
-                    strokeWidth={2}
+                    stroke={CHART_COLORS[p] || "#8884d8"}
+                    strokeWidth={2.5}
                     dot={false}
                     activeDot={{ r: 4 }}
                   />
@@ -373,7 +444,11 @@ export default function AnalyticsPage() {
                     <span className="text-sm font-bold text-muted-foreground w-5">#{i + 1}</span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <p className="text-sm font-medium truncate">{post.title}</p>
+                        {post.permalink ? (
+                          <a href={post.permalink} target="_blank" rel="noopener noreferrer" className="text-sm font-medium truncate hover:underline hover:text-blue-600">{post.title}</a>
+                        ) : (
+                          <p className="text-sm font-medium truncate">{post.title}</p>
+                        )}
                         <Badge variant="outline" className="text-[10px] shrink-0" style={{ borderColor: PLATFORM_COLORS[post.platform], color: PLATFORM_COLORS[post.platform] }}>
                           {PLATFORM_LABELS[post.platform] || post.platform}
                         </Badge>

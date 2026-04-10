@@ -12,7 +12,7 @@ import { useUser } from "@/lib/hooks/use-user";
 import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
 import {
-  BarChart3, Eye, Heart, MessageSquare, Share2, Users, Loader2,
+  BarChart3, Eye, Heart, MessageSquare, Share2, Users, Loader2, Clock, Timer,
   ChevronLeft, ChevronRight, Trash2, TrendingUp, MousePointer, ChevronDown, RefreshCw,
 } from "lucide-react";
 
@@ -20,12 +20,20 @@ const platformColors: Record<string, string> = {
   instagram: "bg-pink-100 text-pink-800",
   youtube: "bg-red-100 text-red-800",
   linkedin: "bg-blue-100 text-blue-800",
+  facebook: "bg-blue-100 text-blue-700",
+  tiktok: "bg-gray-100 text-gray-800",
+  twitter: "bg-sky-100 text-sky-800",
+  snapchat: "bg-yellow-100 text-yellow-800",
 };
 
 const platformLabels: Record<string, string> = {
   instagram: "Instagram",
   youtube: "YouTube",
   linkedin: "LinkedIn",
+  facebook: "Facebook",
+  tiktok: "TikTok",
+  twitter: "Twitter",
+  snapchat: "Snapchat",
 };
 
 const sourceLabels: Record<string, string> = {
@@ -179,24 +187,51 @@ function StatCard({ icon, label, total, byPlatform, format }: {
 }
 
 // Platform-specific column config: which columns to show per platform
+// Table columns per platform
 const platformColumns: Record<string, string[]> = {
   all:       ["views_impressions", "reach", "likes", "comments", "shares", "saves", "engagement"],
-  instagram: ["views_impressions", "reach", "likes", "comments", "shares", "saves", "engagement"],
-  facebook:  ["views_impressions", "reach", "likes", "comments", "shares", "engagement"],
-  youtube:   ["views_impressions", "likes", "comments", "shares", "engagement"],
+  instagram: ["views_impressions", "reach", "likes", "comments", "shares", "saves", "watch_time", "engagement"],
+  facebook:  ["views_impressions", "reach", "likes", "comments", "shares", "watch_time", "engagement"],
+  youtube:   ["views_impressions", "likes", "comments", "shares", "watch_time", "avg_duration", "retention", "engagement"],
   linkedin:  ["views_impressions", "likes", "comments", "shares", "engagement"],
   tiktok:    ["views_impressions", "likes", "comments", "shares", "engagement"],
   twitter:   ["views_impressions", "likes", "comments", "shares", "engagement"],
   snapchat:  ["views_impressions", "likes", "comments", "shares", "engagement"],
 };
 
+// Summary cards per platform — only show cards for metrics that exist on that platform
+// IG/FB use avg_watch_time (per-post average), YouTube uses watch_time (total)
+const platformCards: Record<string, string[]> = {
+  all:       ["posts", "views_impressions", "reach", "likes", "comments", "shares", "saves", "engagement"],
+  instagram: ["posts", "views_impressions", "reach", "likes", "comments", "shares", "saves", "avg_watch_time", "engagement"],
+  facebook:  ["posts", "views_impressions", "reach", "likes", "comments", "shares", "avg_watch_time", "engagement"],
+  youtube:   ["posts", "views_impressions", "likes", "comments", "shares", "watch_time", "avg_duration", "retention", "engagement"],
+  linkedin:  ["posts", "views_impressions", "likes", "comments", "shares", "engagement"],
+  tiktok:    ["posts", "views_impressions", "likes", "comments", "shares", "engagement"],
+  twitter:   ["posts", "views_impressions", "likes", "comments", "shares", "engagement"],
+  snapchat:  ["posts", "views_impressions", "likes", "comments", "shares", "engagement"],
+};
+
+// Column labels — some change per platform
+const columnLabelsPerPlatform: Record<string, Record<string, string>> = {
+  instagram: { views_impressions: "Views", watch_time: "Avg Watch Time" },
+  facebook: { views_impressions: "Views", watch_time: "Avg Watch Time" },
+  youtube: { views_impressions: "Views", watch_time: "Watch Time" },
+  linkedin: { views_impressions: "Views" },
+  tiktok: { views_impressions: "Views" },
+  twitter: { views_impressions: "Views" },
+};
+
 const columnLabels: Record<string, string> = {
-  views_impressions: "Views / Impressions",
+  views_impressions: "Views",
   reach: "Reach",
   likes: "Likes",
   comments: "Comments",
   shares: "Shares",
   saves: "Saves",
+  watch_time: "Watch Time",
+  avg_duration: "Avg Duration",
+  retention: "Retention",
   engagement: "Engagement",
 };
 
@@ -282,39 +317,63 @@ export default function PostAnalyticsPage() {
 
   const posts = postsData?.posts || [];
   const totalPages = postsData?.totalPages || 1;
-  const total = summary?.total;
   const ba = summary?.byAccount || {};
 
-  // Metrics that are NEVER available for certain platforms (show — in UI)
-  const metricUnavailable: Record<string, string[]> = {
-    saves: ["facebook", "linkedin", "youtube", "tiktok", "twitter"],
-    reach: ["youtube"],
-  };
+  // Calculate totals for the selected platform only (not all platforms)
+  function getPlatformTotal() {
+    if (!platformFilter) return summary?.total;
+    let views = 0, reach = 0, likes = 0, comments = 0, shares = 0, saves = 0;
+    let engagement = 0, engCount = 0;
+    let watch_time_seconds = 0, avg_watch_time_seconds = 0, wtCount = 0;
+    let retention_rate = 0, retCount = 0;
+    let avg_view_duration_seconds = 0, durCount = 0;
+    for (const [accountKey, data] of Object.entries(ba)) {
+      const platform = accountKey.split("/")[0];
+      if (platform !== platformFilter) continue;
+      const d = data as any;
+      views += d.views || 0; // Already de-duped (max of views/impressions) by backend
+      reach += d.reach || 0;
+      likes += d.likes || 0;
+      comments += d.comments || 0;
+      shares += d.shares || 0;
+      saves += d.saves || 0;
+      watch_time_seconds += d.watch_time_seconds || 0;
+      if (d.avg_watch_time_seconds > 0) { avg_watch_time_seconds += d.avg_watch_time_seconds; wtCount++; }
+      if (d.avg_view_duration_seconds > 0) { avg_view_duration_seconds += d.avg_view_duration_seconds; durCount++; }
+      if (d.retention_rate > 0) { retention_rate += d.retention_rate; retCount++; }
+      if (d.engagement > 0) { engagement += d.engagement; engCount++; }
+    }
+    return {
+      views, reach, likes, comments, shares, saves,
+      watch_time_seconds,
+      avg_watch_time_seconds: wtCount > 0 ? Math.round(avg_watch_time_seconds / wtCount) : 0,
+      avg_view_duration_seconds: durCount > 0 ? Math.round(avg_view_duration_seconds / durCount) : 0,
+      retention_rate: retCount > 0 ? Math.round(retention_rate / retCount * 100) / 100 : 0,
+      engagement: engCount > 0 ? Math.round(engagement / engCount * 100) / 100 : 0,
+    };
+  }
+  const total = getPlatformTotal();
 
-  // Helper to extract a metric per account from getSummary (all posts, not just current page)
+  // Helper to extract a metric per account — filtered to selected platform only
   function byAccountMetric(metric: string): Record<string, number> {
     const result: Record<string, number> = {};
     for (const [accountKey, data] of Object.entries(ba)) {
       // accountKey format: "instagram/@username"
       const platform = accountKey.split("/")[0];
 
-      // Skip accounts where this metric can never exist
-      const checkMetric = metric === "_views_impressions" ? null : metric === "_count" ? null : metric;
-      if (checkMetric && metricUnavailable[checkMetric]?.includes(platform)) continue;
+      // Only show accounts from the selected platform
+      if (platformFilter && platform !== platformFilter) continue;
 
       let val: number;
       if (metric === "_count") {
         val = (data as any)?.posts || 0;
-      } else if (metric === "_views_impressions") {
-        val = ((data as any)?.views || 0) + ((data as any)?.impressions || 0);
       } else {
         val = (data as any)?.[metric] || 0;
       }
 
-      // Convert "instagram/@jerrylucas148" to "Instagram/@jerrylucas148"
-      const [plat, ...rest] = accountKey.split("/");
-      const label = `${platformLabels[plat] || plat}/${rest.join("/")}`;
-      result[label] = val;
+      // Show just @username (no platform prefix since we're already filtered)
+      const username = accountKey.split("/@")[1] || accountKey;
+      result[`@${username}`] = val;
     }
     return result;
   }
@@ -339,10 +398,10 @@ export default function PostAnalyticsPage() {
         </Button>
       </div>
 
-      {/* Summary Cards with platform breakdown */}
+      {/* Summary Cards — dynamic per platform */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
         {summaryLoading ? (
-          Array.from({ length: 8 }).map((_, i) => (
+          Array.from({ length: 6 }).map((_, i) => (
             <Card key={i}>
               <CardContent className="pt-4 pb-3">
                 <div className="h-7 w-16 bg-muted animate-pulse rounded mb-1" />
@@ -352,55 +411,34 @@ export default function PostAnalyticsPage() {
           ))
         ) : (
           <>
-            <StatCard
-              icon={<BarChart3 className="h-4 w-4 text-muted-foreground" />}
-              label="Total Posts"
-              total={postsData?.total || 0}
-              byPlatform={byAccountMetric("_count")}
-            />
-            <StatCard
-              icon={<Eye className="h-4 w-4 text-muted-foreground" />}
-              label="Views / Impressions"
-              total={(total?.views || 0) + (total?.impressions || 0)}
-              byPlatform={byAccountMetric("_views_impressions")}
-            />
-            <StatCard
-              icon={<Users className="h-4 w-4 text-muted-foreground" />}
-              label="Reach"
-              total={total?.reach || 0}
-              byPlatform={byAccountMetric("reach")}
-            />
-            <StatCard
-              icon={<Heart className="h-4 w-4 text-muted-foreground" />}
-              label="Total Likes"
-              total={total?.likes || 0}
-              byPlatform={byAccountMetric("likes")}
-            />
-            <StatCard
-              icon={<MessageSquare className="h-4 w-4 text-muted-foreground" />}
-              label="Total Comments"
-              total={total?.comments || 0}
-              byPlatform={byAccountMetric("comments")}
-            />
-            <StatCard
-              icon={<Share2 className="h-4 w-4 text-muted-foreground" />}
-              label="Total Shares"
-              total={total?.shares || 0}
-              byPlatform={byAccountMetric("shares")}
-            />
-            <StatCard
-              icon={<TrendingUp className="h-4 w-4 text-muted-foreground" />}
-              label="Total Saves"
-              total={total?.saves || 0}
-              byPlatform={byAccountMetric("saves")}
-            />
-            <StatCard
-              icon={<MousePointer className="h-4 w-4 text-muted-foreground" />}
-              label="Avg Engagement"
-              total={total?.engagement || 0}
-              byPlatform={byAccountMetric("engagement")}
-              format={(n) => `${n}%`}
-            />
+            {(platformCards[platformFilter] || platformCards.all).map((card) => {
+              const cardConfig: Record<string, { icon: React.ReactNode; label: string; total: number; metric: string; format?: (n: number) => string }> = {
+                posts:             { icon: <BarChart3 className="h-4 w-4 text-muted-foreground" />, label: "Total Posts", total: postsData?.total || 0, metric: "_count" },
+                views_impressions: { icon: <Eye className="h-4 w-4 text-muted-foreground" />, label: columnLabelsPerPlatform[platformFilter]?.views_impressions || "Views", total: total?.views || 0, metric: "views" },
+                reach:             { icon: <Users className="h-4 w-4 text-muted-foreground" />, label: "Reach", total: total?.reach || 0, metric: "reach" },
+                likes:             { icon: <Heart className="h-4 w-4 text-muted-foreground" />, label: "Total Likes", total: total?.likes || 0, metric: "likes" },
+                comments:          { icon: <MessageSquare className="h-4 w-4 text-muted-foreground" />, label: "Total Comments", total: total?.comments || 0, metric: "comments" },
+                shares:            { icon: <Share2 className="h-4 w-4 text-muted-foreground" />, label: "Total Shares", total: total?.shares || 0, metric: "shares" },
+                saves:             { icon: <TrendingUp className="h-4 w-4 text-muted-foreground" />, label: "Total Saves", total: total?.saves || 0, metric: "saves" },
+                watch_time:        { icon: <Clock className="h-4 w-4 text-muted-foreground" />, label: "Watch Time", total: total?.watch_time_seconds || 0, metric: "watch_time_seconds", format: (n) => n > 0 ? formatWatchTime(n) : "—" },
+                avg_watch_time:    { icon: <Clock className="h-4 w-4 text-muted-foreground" />, label: "Avg Watch Time", total: total?.avg_watch_time_seconds || 0, metric: "avg_watch_time_seconds", format: (n) => n > 0 ? formatWatchTime(n) : "—" },
+                avg_duration:      { icon: <Timer className="h-4 w-4 text-muted-foreground" />, label: "Avg Duration", total: total?.avg_view_duration_seconds || 0, metric: "avg_view_duration_seconds", format: (n) => n > 0 ? formatWatchTime(n) : "—" },
+                retention:         { icon: <Eye className="h-4 w-4 text-muted-foreground" />, label: "Avg Retention", total: total?.retention_rate || 0, metric: "retention_rate", format: (n) => n > 0 ? `${n}%` : "—" },
+                engagement:        { icon: <MousePointer className="h-4 w-4 text-muted-foreground" />, label: "Avg Engagement", total: total?.engagement || 0, metric: "engagement", format: (n) => `${n}%` },
+              };
+              const c = cardConfig[card];
+              if (!c) return null;
+              return (
+                <StatCard
+                  key={card}
+                  icon={c.icon}
+                  label={c.label}
+                  total={c.total}
+                  byPlatform={byAccountMetric(c.metric)}
+                  format={c.format}
+                />
+              );
+            })}
           </>
         )}
       </div>
@@ -443,7 +481,7 @@ export default function PostAnalyticsPage() {
               <div className="overflow-x-auto">
                 {(() => {
                   const cols = platformColumns[platformFilter] || platformColumns.all;
-                  const fixedCols = 5; // Post, Link, Type, Platform, Source
+                  const fixedCols = platformFilter ? 4 : 5; // Post, Link, Type, [Platform if no filter], Source
                   const totalCols = fixedCols + cols.length + 1 + (canDelete ? 1 : 0); // +1 for Published
                   return (
                 <Table>
@@ -455,7 +493,7 @@ export default function PostAnalyticsPage() {
                       {!platformFilter && <TableHead>Platform</TableHead>}
                       <TableHead>Source</TableHead>
                       {cols.map((col) => (
-                        <TableHead key={col} className="text-right">{columnLabels[col]}</TableHead>
+                        <TableHead key={col} className="text-right">{columnLabelsPerPlatform[platformFilter]?.[col] || columnLabels[col]}</TableHead>
                       ))}
                       <TableHead>Published</TableHead>
                       {canDelete && <TableHead></TableHead>}
@@ -516,9 +554,9 @@ export default function PostAnalyticsPage() {
                         {cols.map((col) => {
                           switch (col) {
                             case "views_impressions":
-                              return <TableCell key={col} className="text-right font-medium">{(post.views || post.impressions || 0).toLocaleString()}</TableCell>;
+                              return <TableCell key={col} className="text-right font-medium">{(post.views || 0).toLocaleString()}</TableCell>;
                             case "reach":
-                              return <TableCell key={col} className="text-right">{post.reach.toLocaleString()}</TableCell>;
+                              return <TableCell key={col} className="text-right">{post.reach > 0 ? post.reach.toLocaleString() : "—"}</TableCell>;
                             case "likes":
                               return <TableCell key={col} className="text-right">{post.likes.toLocaleString()}</TableCell>;
                             case "comments":
@@ -527,6 +565,12 @@ export default function PostAnalyticsPage() {
                               return <TableCell key={col} className="text-right">{post.shares.toLocaleString()}</TableCell>;
                             case "saves":
                               return <TableCell key={col} className="text-right">{post.saves.toLocaleString()}</TableCell>;
+                            case "watch_time":
+                              return <TableCell key={col} className="text-right">{post.watch_time_seconds > 0 ? formatWatchTime(post.watch_time_seconds) : "—"}</TableCell>;
+                            case "avg_duration":
+                              return <TableCell key={col} className="text-right">{post.avg_view_duration > 0 ? formatWatchTime(post.avg_view_duration) : "—"}</TableCell>;
+                            case "retention":
+                              return <TableCell key={col} className="text-right">{post.retention_rate > 0 ? `${post.retention_rate}%` : "—"}</TableCell>;
                             case "engagement":
                               return (
                                 <TableCell key={col} className="text-right">

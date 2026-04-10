@@ -1,6 +1,7 @@
 import { google, type drive_v3 } from "googleapis";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { getDb } from "@/lib/supabase/db";
+import { signState } from "@/server/trpc/routers/social-accounts";
 import { Readable } from "stream";
 
 const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
@@ -120,7 +121,7 @@ export async function getOAuthUrl(orgId: string, brandId: string, from?: string)
     access_type: "offline",
     prompt: "consent",
     scope: SCOPES,
-    state: JSON.stringify({ brandId, orgId, from }),
+    state: signState({ brandId, orgId, from }),
   });
 }
 

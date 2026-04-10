@@ -90,7 +90,15 @@ export const driveRouter = router({
 
   status: protectedProcedure
     .input(z.object({ brandId: z.string().uuid() }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
+      const { profile } = ctx;
+      // Verify brand belongs to user's org
+      if (profile.brand_id && profile.brand_id !== input.brandId) {
+        // Brand-scoped users can only check their own brand
+        if (!["super_admin", "agency_admin", "agency_editor"].includes(profile.role)) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
+        }
+      }
       return getDriveStatus(input.brandId);
     }),
 });

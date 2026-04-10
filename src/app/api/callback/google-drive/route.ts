@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { connectDrive } from "@/server/services/drive/client";
+import { verifyState } from "@/server/trpc/routers/social-accounts";
 import { getDb } from "@/lib/supabase/db";
 
 export async function GET(request: NextRequest) {
@@ -27,9 +28,9 @@ export async function GET(request: NextRequest) {
 
   let state: { brandId: string; orgId: string; from?: string };
   try {
-    state = JSON.parse(stateParam);
+    state = verifyState(stateParam) as any;
   } catch {
-    console.log("[google-drive callback] Invalid state JSON");
+    console.log("[google-drive callback] Invalid state signature");
     return NextResponse.redirect(
       new URL("/accounts?drive_error=invalid_state", baseUrl)
     );

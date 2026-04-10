@@ -76,9 +76,14 @@ echo ""
 echo "[4/4] Building and starting all services..."
 echo ""
 
-# Build sequentially — worker first (small), then app (heavy) to avoid OOM
+# Build worker first (small, fast)
 DOCKER_BUILDKIT=1 docker compose build worker 2>&1
+
+# Stop everything to free memory for the heavy Next.js build
+docker compose down 2>/dev/null || true
 DOCKER_BUILDKIT=1 docker compose build app 2>&1
+
+# Start all services
 docker compose up -d
 
 echo ""

@@ -6,9 +6,22 @@ import { Badge } from "@/components/ui/badge";
 import { useBrand } from "@/lib/hooks/use-brand";
 import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
-import { Clock, Loader2, Calendar, TrendingUp, FileText, RefreshCw } from "lucide-react";
+import {
+  Clock,
+  Loader2,
+  TrendingUp,
+  RefreshCw,
+  Sparkles,
+  Database,
+  AlertCircle,
+  Zap,
+} from "lucide-react";
 
-const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const DAYS_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const SHORT_DAYS: Record<string, string> = {
+  Monday: "Mon", Tuesday: "Tue", Wednesday: "Wed",
+  Thursday: "Thu", Friday: "Fri", Saturday: "Sat", Sunday: "Sun",
+};
 
 const PLATFORM_COLORS: Record<string, string> = {
   instagram: "bg-pink-100 text-pink-700 border-pink-200",
@@ -20,17 +33,31 @@ const PLATFORM_COLORS: Record<string, string> = {
   snapchat: "bg-yellow-100 text-yellow-700 border-yellow-200",
 };
 
+const PLATFORM_LABELS: Record<string, string> = {
+  instagram: "Instagram", youtube: "YouTube", linkedin: "LinkedIn",
+  facebook: "Facebook", tiktok: "TikTok", twitter: "X", snapchat: "Snapchat",
+};
+
+function formatTime(utcTime: string): string {
+  // Convert "14:00" UTC to local display
+  const [h, m] = utcTime.split(":").map(Number);
+  const d = new Date();
+  d.setUTCHours(h, m || 0, 0, 0);
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 export default function BestTimesPage() {
   const { activeBrandId, loading } = useBrand();
 
-  const { data, isLoading, refetch } = trpc.analytics.getBestPostingTimes.useQuery(
+  const { data, isLoading, refetch } = trpc.analytics.getSmartBestTimes.useQuery(
     { brandId: activeBrandId! },
     { enabled: !!activeBrandId }
   );
 
   const refreshMutation = trpc.analytics.refreshTrendForecast.useMutation({
     onSuccess: () => {
-      toast.success("Analyzing your content — please wait...");
+      toast.success("Refreshing trend data — this may take a moment...");
+      setTimeout(() => refetch(), 8000);
     },
     onError: (err) => toast.error(err.message),
   });
@@ -69,41 +96,27 @@ export default function BestTimesPage() {
     );
   }
 
-  const platforms = data?.platforms || [];
-  const draftMedia = data?.draftMedia || [];
-  const hasData = platforms.some((p: any) => (p.bestPostingTimes as any[]).length > 0);
-
-  // Merge best times across platforms into a weekly grid
-  const weeklyGrid: Record<string, { platform: string; times: string[]; reason: string; boost: number }[]> = {};
-  for (const day of DAYS) weeklyGrid[day] = [];
-
-  for (const p of platforms) {
-    for (const bt of p.bestPostingTimes as any[]) {
-      const day = bt.day;
-      if (day && weeklyGrid[day]) {
-        weeklyGrid[day].push({
-          platform: bt.platform || p.platform,
-          times: bt.times || [],
-          reason: bt.reason || "",
-          boost: bt.expected_engagement_boost || 0,
-        });
-      }
-    }
-  }
+  const accounts = data?.accounts || [];
+  const dataAccounts = accounts.filter((a: any) => a.source === "data");
+  const aiAccounts = accounts.filter((a: any) => a.source === "ai");
+  const noDataAccounts = accounts.filter((a: any) => a.source === "no_data");
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Best Times to Post</h1>
-          <p className="text-muted-foreground">
-            AI-powered posting schedule based on your historical performance
+          <p className="text-sm text-muted-foreground">
+            Per-account recommendations based on your past performance
           </p>
         </div>
         <Button
           variant="outline"
           size="sm"
-          onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
+          onClick={() => {
+            activeBrandId && refreshMutation.mutate({ brandId: activeBrandId });
+          }}
           disabled={refreshMutation.isPending}
         >
           <RefreshCw className={`h-4 w-4 mr-2 ${refreshMutation.isPending ? "animate-spin" : ""}`} />
@@ -111,144 +124,204 @@ export default function BestTimesPage() {
         </Button>
       </div>
 
-      {!hasData ? (
+      {/* Legend */}
+      <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <Database className="h-3.5 w-3.5 text-green-600" />
+          Data-driven (from your posts)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <Sparkles className="h-3.5 w-3.5 text-violet-500" />
+          AI-suggested (no data yet)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <Clock className="h-3.5 w-3.5" />
+          Times shown in your local timezone
+        </span>
+      </div>
+
+      {accounts.length === 0 ? (
         <div className="flex items-center justify-center h-64 border-2 border-dashed rounded-lg">
           <div className="text-center text-muted-foreground">
             <Clock className="h-12 w-12 mx-auto mb-3 opacity-50" />
-            <p className="font-medium">No posting time data yet</p>
-            <p className="text-sm">
-              Recommendations are generated weekly after publishing content.
-              Keep posting to get personalized time suggestions.
+            <p className="font-medium">No social accounts connected</p>
+            <p className="text-sm mt-1">
+              Connect accounts in the Accounts page to get posting recommendations.
             </p>
           </div>
         </div>
       ) : (
-        <>
-          {/* Weekly Schedule Grid */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Calendar className="h-5 w-5" />
-                Weekly Posting Schedule
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {DAYS.map((day) => {
-                  const slots = weeklyGrid[day];
-                  if (slots.length === 0) return null;
-
-                  return (
-                    <div key={day} className="flex items-start gap-4 p-3 rounded-lg border bg-card">
-                      <div className="w-24 flex-shrink-0">
-                        <p className="font-semibold text-sm">{day}</p>
-                      </div>
-                      <div className="flex-1 space-y-2">
-                        {slots.map((slot, i) => (
-                          <div key={i} className="flex items-center gap-2 flex-wrap">
-                            <Badge
-                              variant="outline"
-                              className={`text-xs capitalize ${PLATFORM_COLORS[slot.platform] || ""}`}
-                            >
-                              {slot.platform}
-                            </Badge>
-                            {slot.times.map((time) => (
-                              <Badge key={time} variant="secondary" className="text-xs font-mono">
-                                <Clock className="h-2.5 w-2.5 mr-1" />
-                                {time}
-                              </Badge>
-                            ))}
-                            {slot.boost > 0 && (
-                              <span className="text-xs text-green-600 flex items-center gap-0.5">
-                                <TrendingUp className="h-3 w-3" />
-                                +{slot.boost}% engagement
-                              </span>
-                            )}
-                            {slot.reason && (
-                              <span className="text-xs text-muted-foreground">{slot.reason}</span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
+        <div className="space-y-8">
+          {/* Data-Driven Accounts */}
+          {dataAccounts.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Database className="h-4 w-4 text-green-600" />
+                <h2 className="text-lg font-semibold">Based on Your Data</h2>
+                <Badge variant="secondary" className="text-xs">
+                  {dataAccounts.length} account{dataAccounts.length !== 1 ? "s" : ""}
+                </Badge>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* Per-Platform Breakdown */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {platforms
-              .filter((p: any) => (p.bestPostingTimes as any[]).length > 0)
-              .map((p: any) => (
-                <Card key={p.platform}>
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-sm capitalize flex items-center gap-2">
-                      <Badge
-                        variant="outline"
-                        className={`${PLATFORM_COLORS[p.platform] || ""}`}
-                      >
-                        {p.platform}
-                      </Badge>
-                      Best Times
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-2">
-                      {(p.bestPostingTimes as any[]).map((bt: any, i: number) => (
-                        <div key={i} className="flex items-center justify-between text-sm">
-                          <span className="font-medium">{bt.day}</span>
-                          <div className="flex gap-1">
-                            {(bt.times || []).map((t: string) => (
-                              <Badge key={t} variant="secondary" className="text-xs font-mono">
-                                {t}
-                              </Badge>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-3">
-                      Updated: {p.snapshotDate ? new Date(p.snapshotDate).toLocaleDateString() : "Never"}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
-          </div>
-        </>
-      )}
-
-      {/* Draft Media Ready to Publish */}
-      {draftMedia.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <FileText className="h-5 w-5" />
-              Draft Media Ready to Publish
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground mb-3">
-              These media groups are ready. Use the recommended times above to schedule them for maximum engagement.
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {draftMedia.map((media: any) => (
-                <a
-                  key={media.id}
-                  href={`/publish/${media.id}`}
-                  className="p-3 rounded-lg border hover:bg-accent transition-colors"
-                >
-                  <p className="text-sm font-medium truncate">{media.title}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {media.variants} variant{media.variants !== 1 ? "s" : ""}
-                  </p>
-                </a>
-              ))}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {dataAccounts.map((acc: any) => (
+                  <AccountCard key={acc.accountId} account={acc} />
+                ))}
+              </div>
             </div>
-          </CardContent>
-        </Card>
+          )}
+
+          {/* AI-Suggested Accounts */}
+          {aiAccounts.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-violet-500" />
+                <h2 className="text-lg font-semibold">AI Suggested</h2>
+                <Badge variant="secondary" className="text-xs">
+                  {aiAccounts.length} account{aiAccounts.length !== 1 ? "s" : ""}
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground -mt-2">
+                Not enough past data — these are general recommendations. They'll become data-driven as you publish more.
+              </p>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {aiAccounts.map((acc: any) => (
+                  <AccountCard key={acc.accountId} account={acc} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* No Data (LLM also unavailable) */}
+          {noDataAccounts.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 text-amber-500" />
+                <h2 className="text-lg font-semibold">Needs More Data</h2>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {noDataAccounts.map((acc: any) => (
+                  <Card key={acc.accountId} className="border-dashed">
+                    <CardContent className="py-4 px-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Badge variant="outline" className={`text-xs capitalize ${PLATFORM_COLORS[acc.platform] || ""}`}>
+                          {PLATFORM_LABELS[acc.platform] || acc.platform}
+                        </Badge>
+                        <span className="text-sm font-medium">@{acc.username}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Publish a few posts to get personalized time recommendations. No AI provider configured for fallback.
+                      </p>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+// ─── Account Card Component ───
+
+function AccountCard({ account }: { account: any }) {
+  const isData = account.source === "data";
+  const bestTimes: any[] = account.bestTimes || [];
+
+  // Find the single best slot for the highlight
+  const topSlot = account.topSlot || (bestTimes.length > 0 ? bestTimes[0] : null);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Badge
+              variant="outline"
+              className={`text-xs capitalize ${PLATFORM_COLORS[account.platform] || ""}`}
+            >
+              {PLATFORM_LABELS[account.platform] || account.platform}
+            </Badge>
+            <span className="text-sm font-semibold">@{account.username}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {isData ? (
+              <Badge variant="outline" className="text-[10px] gap-1 text-green-700 border-green-200 bg-green-50">
+                <Database className="h-2.5 w-2.5" />
+                {account.totalPosts} posts analyzed
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[10px] gap-1 text-violet-700 border-violet-200 bg-violet-50">
+                <Sparkles className="h-2.5 w-2.5" />
+                AI suggested
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Top Slot Highlight */}
+        {isData && topSlot && (
+          <div className="flex items-center gap-2 p-2.5 rounded-lg bg-primary/5 border border-primary/10">
+            <Zap className="h-4 w-4 text-primary flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                Best: {topSlot.day} at {formatTime(topSlot.time)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {topSlot.avgEngagement}% avg engagement
+                {topSlot.avgViews > 0 && ` · ~${topSlot.avgViews.toLocaleString()} views`}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Time Slots */}
+        {bestTimes.length > 0 ? (
+          <div className="space-y-1.5">
+            {bestTimes.map((bt: any, i: number) => (
+              <div
+                key={i}
+                className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-muted/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground w-8">
+                    {SHORT_DAYS[bt.day] || bt.day}
+                  </span>
+                  <Badge variant="secondary" className="text-xs font-mono px-2">
+                    <Clock className="h-2.5 w-2.5 mr-1" />
+                    {formatTime(bt.time)}
+                  </Badge>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {isData && bt.boost > 0 && (
+                    <span className="text-xs text-green-600 flex items-center gap-0.5 font-medium">
+                      <TrendingUp className="h-3 w-3" />
+                      +{bt.boost}%
+                    </span>
+                  )}
+                  {isData && bt.postCount > 0 && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {bt.postCount} post{bt.postCount !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {!isData && bt.reason && (
+                    <span className="text-[10px] text-muted-foreground max-w-[180px] truncate">
+                      {bt.reason}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground text-center py-2">
+            No time recommendations available yet.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
