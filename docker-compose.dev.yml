@@ -1,0 +1,39 @@
+# ============================================
+# MediaHub — Dev overlay (HMR, no rebuilds)
+# ============================================
+#
+# Start dev mode:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   (or just: bash dev.sh)
+#
+# Code edits under src/ hot-reload instantly:
+#   - app:    next dev picks up frontend/backend changes (Fast Refresh)
+#   - worker: tsx watch restarts worker.ts on change
+# No `docker compose build` needed after the first `up`.
+#
+# The source tree is bind-mounted into /app. node_modules and .next are kept
+# as anonymous volumes so the image's installed deps / build cache survive and
+# the (empty) host copies never overwrite them.
+# ============================================
+
+services:
+  app:
+    build:
+      target: dev
+    command: ["npm", "run", "dev"]
+    environment:
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+
+  worker:
+    build:
+      target: dev
+    command: ["npx", "tsx", "watch", "worker.ts"]
+    environment:
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules

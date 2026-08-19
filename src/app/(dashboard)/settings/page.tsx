@@ -7,8 +7,11 @@ import { OrganizationSettings } from "@/components/settings/OrganizationSettings
 import { LlmManagement } from "@/components/settings/LlmManagement";
 import { PersonalLlmKey } from "@/components/settings/PersonalLlmKey";
 import { AuditLog } from "@/components/settings/AuditLog";
+import { InstagramSessions, InstagramGlyph } from "@/components/settings/InstagramSessions";
+import { FacebookSessions, FacebookGlyph } from "@/components/settings/FacebookSessions";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Shield, Users, Building2, Brain, Key, ScrollText } from "lucide-react";
+import { isGodUser } from "@/lib/god";
 
 export default function SettingsPage() {
   const { profile, loading } = useUser();
@@ -26,6 +29,8 @@ export default function SettingsPage() {
   const isSuperAdmin = profile.role === "super_admin";
   const isAdmin = isSuperAdmin || profile.role === "agency_admin";
   const canManageUsers = isAdmin || profile.role === "brand_owner";
+  // God (single-user) mode: hide Users / Organization / LLM-Access tabs.
+  const god = isGodUser(profile);
 
   // Non-admin users can still access settings for personal LLM key
   if (!canManageUsers) {
@@ -59,25 +64,35 @@ export default function SettingsPage() {
         <p className="text-muted-foreground">Manage your organization and team</p>
       </div>
 
-      <Tabs defaultValue="users">
+      <Tabs defaultValue={god ? "credentials" : "users"}>
         <TabsList>
-          <TabsTrigger value="users" className="gap-2">
-            <Users className="h-4 w-4" />
-            Users
-          </TabsTrigger>
+          {!god && (
+            <TabsTrigger value="users" className="gap-2">
+              <Users className="h-4 w-4" />
+              Users
+            </TabsTrigger>
+          )}
           {isSuperAdmin && (
             <TabsTrigger value="credentials" className="gap-2">
               <Shield className="h-4 w-4" />
               Platform Credentials
             </TabsTrigger>
           )}
-          {isAdmin && (
+          <TabsTrigger value="instagram" className="gap-2">
+            <InstagramGlyph className="h-4 w-4" />
+            Instagram
+          </TabsTrigger>
+          <TabsTrigger value="facebook" className="gap-2">
+            <FacebookGlyph className="h-4 w-4" />
+            Facebook
+          </TabsTrigger>
+          {isAdmin && !god && (
             <TabsTrigger value="organization" className="gap-2">
               <Building2 className="h-4 w-4" />
               Organization
             </TabsTrigger>
           )}
-          {isSuperAdmin && (
+          {isSuperAdmin && !god && (
             <TabsTrigger value="llm" className="gap-2">
               <Brain className="h-4 w-4" />
               LLM Access
@@ -95,9 +110,11 @@ export default function SettingsPage() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="users" className="mt-6">
-          <UserManagement profile={profile} />
-        </TabsContent>
+        {!god && (
+          <TabsContent value="users" className="mt-6">
+            <UserManagement profile={profile} />
+          </TabsContent>
+        )}
 
         {isSuperAdmin && (
           <TabsContent value="credentials" className="mt-6">
@@ -105,13 +122,21 @@ export default function SettingsPage() {
           </TabsContent>
         )}
 
-        {isAdmin && (
+        <TabsContent value="instagram" className="mt-6">
+          <InstagramSessions />
+        </TabsContent>
+
+        <TabsContent value="facebook" className="mt-6">
+          <FacebookSessions />
+        </TabsContent>
+
+        {isAdmin && !god && (
           <TabsContent value="organization" className="mt-6">
             <OrganizationSettings profile={profile} />
           </TabsContent>
         )}
 
-        {isSuperAdmin && (
+        {isSuperAdmin && !god && (
           <TabsContent value="llm" className="mt-6">
             <LlmManagement />
           </TabsContent>

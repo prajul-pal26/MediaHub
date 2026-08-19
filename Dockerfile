@@ -46,6 +46,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Chromium for the Playwright-based Facebook page scraper (session rendering).
+RUN apk add --no-cache \
+    chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    CHROMIUM_PATH=/usr/bin/chromium-browser
+
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
@@ -53,6 +59,8 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+# Ensure the full playwright-core package is present (belt-and-suspenders vs tracing).
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules/playwright-core ./node_modules/playwright-core
 
 USER nextjs
 EXPOSE 3000
@@ -67,3 +75,21 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 CMD ["npx", "tsx", "worker.ts"]
+
+# ─── Dev (HMR — no production build) ───
+# Used by docker-compose.dev.yml. Source is bind-mounted at runtime, so code
+# edits hot-reload with NO image rebuild. node_modules stays in the image
+# (masked by an anonymous volume) so the empty host tree never clobbers it.
+FROM base AS dev
+ENV NODE_ENV=development
+# ffmpeg (worker) + chromium (Facebook scraper) so the same image runs both.
+RUN apk add --no-cache \
+    ffmpeg chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    CHROMIUM_PATH=/usr/bin/chromium-browser \
+    NEXT_TELEMETRY_DISABLED=1 \
+    WATCHPACK_POLLING=true
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+EXPOSE 3000
+CMD ["npm", "run", "dev"]

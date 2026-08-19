@@ -6,8 +6,11 @@
 #         bash start.sh --reset   (wipe everything, fresh start)
 #  Requirements: Docker + Git
 #
-#  Always rebuilds ALL containers on every run so that any change
-#  (code, schema, migrations, config) is picked up automatically.
+#  Uses BuildKit layer caching: only stages affected by your changes
+#  rebuild. Unchanged deps / build stages are reused, so a no-op run is
+#  fast and a code-only change skips `npm ci`.
+#
+#  For fast iteration without rebuilds, use dev mode instead: bash dev.sh
 
 set -e
 cd "$(dirname "$0")"
@@ -76,14 +79,12 @@ echo ""
 echo "[4/4] Building and starting all services..."
 echo ""
 
-# Build worker first (small, fast)
-DOCKER_BUILDKIT=1 docker compose build worker 2>&1
+# Build app + worker in one pass. BuildKit builds the shared `deps` stage
+# once and reuses cached layers, so unchanged code rebuilds nothing.
+# Infra (db, redis, kong, …) stays up throughout — no mid-build teardown.
+DOCKER_BUILDKIT=1 docker compose build app worker 2>&1
 
-# Stop everything to free memory for the heavy Next.js build
-docker compose down 2>/dev/null || true
-DOCKER_BUILDKIT=1 docker compose build app 2>&1
-
-# Start all services
+# Start / update all services (only changed containers are recreated).
 docker compose up -d
 
 echo ""
@@ -101,4 +102,5 @@ echo ""
 echo "  View logs:   docker compose logs -f app worker"
 echo "  Stop:        docker compose down"
 echo "  Full reset:  bash start.sh --reset"
+echo "  Dev (HMR):   bash dev.sh   ← code edits reload with no rebuild"
 echo ""

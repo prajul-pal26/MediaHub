@@ -47,17 +47,29 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Redirect unauthenticated users to login (except auth pages and API routes)
-  if (
-    !user &&
-    !request.nextUrl.pathname.startsWith("/login") &&
-    !request.nextUrl.pathname.startsWith("/signup") &&
-    !request.nextUrl.pathname.startsWith("/reset-password") &&
-    !request.nextUrl.pathname.startsWith("/api") &&
-    !request.nextUrl.pathname.startsWith("/callback/auth")
-  ) {
+  const pathname = request.nextUrl.pathname;
+  // Public marketing routes — reachable without authentication.
+  // NOTE: use exact "/" (startsWith("/") would match everything).
+  const isPublicRoute =
+    pathname === "/" ||
+    pathname.startsWith("/instagram") ||
+    pathname.startsWith("/facebook") ||
+    pathname.startsWith("/login") ||
+    pathname.startsWith("/signup") ||
+    pathname.startsWith("/reset-password") ||
+    pathname.startsWith("/api") ||
+    pathname.startsWith("/callback/auth");
+
+  // OPEN-STUDIO MODE: instead of sending logged-out visitors to /login, route them
+  // through the auto-login (/api/studio-enter), which signs them in as the local
+  // admin and drops them straight into the studio. The login page + all auth code
+  // are preserved (still reachable at /login) for when real auth is switched on later.
+  if (!user && !isPublicRoute) {
+    const dest = pathname + (request.nextUrl.search || "");
     const url = request.nextUrl.clone();
-    url.pathname = "/login";
+    url.pathname = "/api/studio-enter";
+    url.search = "";
+    url.searchParams.set("next", dest);
     return NextResponse.redirect(url);
   }
 

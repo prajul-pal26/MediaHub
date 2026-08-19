@@ -109,14 +109,17 @@ export async function resolveLlmConfig(
 ): Promise<LLMConfig | null> {
   const db = getDb();
 
-  // 1. Check user's personal config
+  // 1. Check user's personal config. A user can have multiple saved keys
+  // (the Settings switcher) but only one active — pick it deterministically.
   const { data: userConfig } = await db
     .from("llm_configurations")
     .select("*")
     .eq("user_id", userId)
     .eq("scope", "user")
     .eq("is_active", true)
-    .single();
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (userConfig) {
     return configRowToLLMConfig(userConfig, "user");
@@ -432,6 +435,145 @@ export async function chatCompletion(params: {
   return result;
 }
 
+// ─── Personal key-pool rotation (any OpenAI-compatible provider) ───
+
+type PoolKey = { apiKey: string; baseUrl: string; model: string; ref: string };
+
+// Per-key cooldown after a 402/429/401 so an exhausted key isn't retried every
+// request. In-memory per server instance — resets on restart, which is fine.
+const keyCooldownUntil = new Map<string, number>();
+// Round-robin cursor so load spreads evenly across the pool.
+let poolCursor = 0;
+const KEY_COOLDOWN_MS = 60_000; // rate/quota limited → rest 60s
+const AUTH_COOLDOWN_MS = 5 * 60_000; // rejected/blocked key → rest 5m
+const REQUEST_TIMEOUT_MS = 60_000; // abandon a slow key after 60s and rotate
+
+/**
+ * All of a user's saved personal keys for a provider, as a rotatable pool.
+ * Each entry keeps its own base URL + model so mixed setups still work.
+ */
+async function getUserKeyPool(
+  userId: string,
+  provider: string,
+  fallback: { baseUrl: string; model: string },
+): Promise<PoolKey[]> {
+  const db = getDb();
+  const { data } = await db
+    .from("llm_configurations")
+    .select("id, api_key_encrypted, base_url, default_model, is_active, updated_at")
+    .eq("user_id", userId)
+    .eq("scope", "user")
+    .eq("provider", provider)
+    .order("is_active", { ascending: false })
+    .order("updated_at", { ascending: false });
+  const pool: PoolKey[] = [];
+  for (const row of data || []) {
+    try {
+      pool.push({
+        apiKey: decrypt(row.api_key_encrypted),
+        baseUrl: row.base_url || fallback.baseUrl,
+        model: row.default_model || fallback.model,
+        ref: row.id,
+      });
+    } catch {}
+  }
+  return pool;
+}
+
+/**
+ * Call an OpenAI-compatible endpoint using the user's whole key pool with
+ * automatic failover: a key that is rate-limited / out of free quota (402/429),
+ * rejected (401/403), erroring (5xx) or timing out is skipped and the next key
+ * is tried. Load spreads round-robin, and exhausted keys cool down so they
+ * aren't retried on every request.
+ */
+async function callOpenAICompatiblePool(
+  config: LLMConfig,
+  body: any,
+  userId: string,
+): Promise<any> {
+  const fallback = { baseUrl: config.baseUrl, model: config.model };
+  let pool = await getUserKeyPool(userId, config.provider, fallback);
+
+  // No saved pool (resolution came from org/brand, or a legacy key) → single key.
+  if (pool.length === 0) {
+    pool = [{ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, ref: "resolved" }];
+  }
+
+  // Round-robin the starting key for balanced usage.
+  if (pool.length > 1) {
+    const start = poolCursor % pool.length;
+    poolCursor = (poolCursor + 1) % pool.length;
+    pool = [...pool.slice(start), ...pool.slice(0, start)];
+  }
+
+  // Prefer keys not cooling down, but keep them as a last resort.
+  const now = Date.now();
+  const fresh = pool.filter((k) => (keyCooldownUntil.get(k.apiKey) ?? 0) <= now);
+  const order = fresh.length ? [...fresh, ...pool.filter((k) => !fresh.includes(k))] : pool;
+
+  let lastErr: Error | null = null;
+
+  for (const pk of order) {
+    const headers = {
+      "Content-Type": "application/json",
+      ...(LLM_PROVIDERS[config.provider]?.headers(pk.apiKey) || {
+        Authorization: `Bearer ${pk.apiKey}`,
+      }),
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(`${pk.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...body, model: pk.model }),
+        signal: controller.signal,
+      });
+    } catch (e: any) {
+      clearTimeout(timer);
+      lastErr =
+        e?.name === "AbortError"
+          ? new Error("request timed out")
+          : e instanceof Error
+            ? e
+            : new Error(String(e));
+      continue; // network error / timeout → next key
+    }
+    clearTimeout(timer);
+
+    if (response.ok) return response.json();
+
+    const status = response.status;
+    const errBody = await response.json().catch(() => ({}));
+    const errMsg = (errBody as any).error?.message || response.statusText;
+
+    if (status === 402 || status === 429) {
+      keyCooldownUntil.set(pk.apiKey, Date.now() + KEY_COOLDOWN_MS);
+      lastErr = new Error(`out of free quota / rate limited (${status})`);
+      continue;
+    }
+    if (status === 401 || status === 403) {
+      keyCooldownUntil.set(pk.apiKey, Date.now() + AUTH_COOLDOWN_MS);
+      lastErr = new Error(`key rejected (${status}): ${errMsg}`);
+      continue;
+    }
+    if (status >= 500) {
+      lastErr = new Error(`provider error (${status})`);
+      continue;
+    }
+    // 4xx request-level error is identical for every key → fail fast.
+    throw new Error(`LLM error (${config.provider}): ${errMsg}`);
+  }
+
+  throw new Error(
+    lastErr
+      ? `All saved keys are unavailable right now (${lastErr.message}). Add another key in Settings → Personal LLM Keys.`
+      : "No usable API key found. Add one in Settings → Personal LLM Keys.",
+  );
+}
+
 // ─── OpenRouter Key Pool Rotation ───
 
 /**
@@ -563,6 +705,11 @@ async function callOpenAICompatible(config: LLMConfig, params: any, orgId?: stri
     tool_choice: params.tools?.length ? "auto" : undefined,
   };
 
+  // Personal keys → rotate across the user's whole pool with failover.
+  if (params.userId) {
+    return callOpenAICompatiblePool(config, body, params.userId);
+  }
+  // No user context (legacy/org path) → existing OpenRouter org-pool rotation.
   return callWithKeyRotation(config, body, orgId);
 }
 

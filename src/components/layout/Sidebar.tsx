@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { isGodUser } from "@/lib/god";
 import type { UserProfile, Mode } from "@/lib/types";
 import {
   Image,
@@ -21,6 +22,7 @@ import {
   Users,
   MessagesSquare,
   Clock,
+  Search,
 } from "lucide-react";
 
 interface NavItem {
@@ -42,6 +44,8 @@ const navItems: NavItem[] = [
   { label: "Threads", href: "/threads", icon: MessagesSquare, mode: "click" },
   { label: "Queue", href: "/queue", icon: ListTodo, mode: "click" },
   { label: "Accounts", href: "/accounts", icon: Link2, mode: "click" },
+  { label: "Instagram", href: "/instagram", icon: Search, mode: "click" },
+  { label: "Facebook", href: "/fb-scraper", icon: Users, mode: "click" },
   {
     label: "Brands",
     href: "/brands",
@@ -80,20 +84,23 @@ export function Sidebar({ profile }: SidebarProps) {
   const pathname = usePathname();
   const currentMode = getCurrentMode(pathname);
 
+  const god = isGodUser(profile);
   const visibleItems = navItems.filter((item) => {
     if (item.mode !== currentMode) return false;
     if (item.roles && profile && !item.roles.includes(profile.role)) return false;
+    // God (single-user) mode: no brand management — it's a personal studio.
+    if (god && item.href === "/brands") return false;
     return true;
   });
 
   return (
-    <aside className="w-60 border-r bg-card h-full flex flex-col">
-      <div className="p-4 border-b">
-        <Link href="/library" className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
+    <aside className="w-60 border-r border-sidebar-border bg-sidebar text-sidebar-foreground h-full flex flex-col">
+      <div className="p-4 border-b border-sidebar-border">
+        <Link href="/library" className="flex items-center gap-2.5 group">
+          <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-primary to-chart-2 flex items-center justify-center shadow-sm ring-1 ring-inset ring-white/10 transition-transform group-hover:scale-105">
             <span className="text-primary-foreground font-bold text-sm">M</span>
           </div>
-          <span className="font-semibold text-lg">MediaHub</span>
+          <span className="font-semibold text-lg tracking-tight text-foreground">MediaHub</span>
         </Link>
       </div>
 
@@ -106,13 +113,18 @@ export function Sidebar({ profile }: SidebarProps) {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
+                "group flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150",
                 isActive
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
+                  : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
               )}
             >
-              <Icon className="h-4 w-4" />
+              <Icon
+                className={cn(
+                  "h-4 w-4 shrink-0 transition-colors",
+                  isActive ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground"
+                )}
+              />
               {item.label}
             </Link>
           );
@@ -120,15 +132,17 @@ export function Sidebar({ profile }: SidebarProps) {
       </nav>
 
       {profile && (
-        <div className="p-3 border-t">
-          <div className="flex items-center gap-2 px-3 py-2">
-            <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
-              {profile.name?.[0]?.toUpperCase() || "?"}
+        <div className="p-3 border-t border-sidebar-border">
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-sidebar-accent/50 transition-colors">
+            <div className="h-8 w-8 rounded-full bg-gradient-to-br from-primary to-chart-2 text-primary-foreground flex items-center justify-center text-xs font-semibold shrink-0">
+              {god ? "G" : profile.name?.[0]?.toUpperCase() || "?"}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{profile.name}</p>
+              <p className="text-sm font-medium truncate">
+                {god ? "God" : profile.name}
+              </p>
               <p className="text-xs text-muted-foreground truncate">
-                {profile.role.replace(/_/g, " ")}
+                {god ? "Owner · full access" : profile.role.replace(/_/g, " ")}
               </p>
             </div>
           </div>

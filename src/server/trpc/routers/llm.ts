@@ -61,10 +61,12 @@ export const llmRouter = router({
       is_active: c.is_active,
       created_at: c.created_at,
       updated_at: c.updated_at,
-      // Never expose the raw key — only a masked version
       api_key_masked: c.api_key_encrypted
         ? "••••••••" + decrypt(c.api_key_encrypted).slice(-4)
         : "",
+      // Full key — this endpoint is scoped to the caller's own/org configs, so
+      // the owner can view & copy their configured key (eye-toggle reveal).
+      api_key: c.api_key_encrypted ? decrypt(c.api_key_encrypted) : "",
     }));
   }),
 
@@ -165,7 +167,44 @@ export const llmRouter = router({
         result = data;
       }
 
+      // Enforce a single active personal key: when this user-scope config is set
+      // active, deactivate the user's other saved keys.
+      if (input.scope === "user" && input.is_active && (result as any)?.id) {
+        await db
+          .from("llm_configurations")
+          .update({ is_active: false })
+          .eq("user_id", profile.id)
+          .eq("scope", "user")
+          .neq("id", (result as any).id);
+      }
+
       return result;
+    }),
+
+  /** Switch which saved personal key is the active one (single-active). */
+  setActiveConfig: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+      const { data, error } = await db
+        .from("llm_configurations")
+        .update({ is_active: true, updated_at: new Date().toISOString() })
+        .eq("id", input.id)
+        .eq("user_id", profile.id)
+        .eq("scope", "user")
+        .select()
+        .maybeSingle();
+      if (error)
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
+      if (!data) throw new TRPCError({ code: "NOT_FOUND", message: "Key not found" });
+      // Deactivate the user's other personal keys.
+      await db
+        .from("llm_configurations")
+        .update({ is_active: false })
+        .eq("user_id", profile.id)
+        .eq("scope", "user")
+        .neq("id", input.id);
+      return { success: true };
     }),
 
   /** Delete a config */
@@ -206,14 +245,16 @@ export const llmRouter = router({
       // Validate brand access if a specific brandId was provided
       if (input?.brandId) assertBrandAccess(profile, input.brandId);
 
-      // 1. Check user's personal config
+      // 1. Check user's personal config (may have several saved keys; one active)
       const { data: userConfig } = await db
         .from("llm_configurations")
         .select("*")
         .eq("user_id", profile.id)
         .eq("scope", "user")
         .eq("is_active", true)
-        .single();
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
       if (userConfig) return { config: sanitizeConfig(userConfig), scope: "user" as const };
 
       // 2. Check brand access — uses the provider assigned to this brand

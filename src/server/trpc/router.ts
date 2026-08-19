@@ -14,6 +14,11 @@ import { chatRouter } from "./routers/chat";
 import { llmRouter } from "./routers/llm";
 import { analyticsRouter } from "./routers/analytics";
 import { threadsRouter } from "./routers/threads";
+import { instaFetcherRouter } from "./routers/insta-fetcher";
+import { fbFetcherRouter } from "./routers/fb-fetcher";
+import { fbSessionRouter } from "./routers/fb-session";
+import { fbScraperRouter } from "./routers/fb-scraper";
+import { instaCommentsRouter } from "./routers/insta-comments";
 
 export async function createTRPCContext() {
   const supabase = await createServerSupabaseClient();
@@ -57,6 +62,11 @@ export const appRouter = router({
   llm: llmRouter,
   analytics: analyticsRouter,
   threads: threadsRouter,
+  instaFetcher: instaFetcherRouter,
+  fbFetcher: fbFetcherRouter,
+  fbSession: fbSessionRouter,
+  fbScraper: fbScraperRouter,
+  instaComments: instaCommentsRouter,
 });
 
 export type AppRouter = typeof appRouter;

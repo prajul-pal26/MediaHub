@@ -1,0 +1,22 @@
+import { chromium } from "playwright-core";
+import fs from "node:fs";
+const raw = fs.readFileSync("/Users/pranjul/workspace/governance_report/.fb_session_new","utf8").trim();
+const cookies = raw.split(";").map(p=>{const i=p.indexOf("=");return{name:p.slice(0,i).trim(),value:p.slice(i+1).trim(),domain:".facebook.com",path:"/"};}).filter(c=>c.name);
+const h = process.argv[2];
+const b = await chromium.launch({executablePath:process.env.CHROMIUM_PATH,headless:true});
+const ctx = await b.newContext({locale:"en-US"}); await ctx.addCookies(cookies);
+const p = await ctx.newPage();
+// go straight to the dedicated links page
+await p.goto(`https://www.facebook.com/${h}/directory_links`,{waitUntil:"domcontentloaded",timeout:45000});
+await p.waitForTimeout(5000);
+console.log("URL:", p.url());
+console.log("logged in:", !/Log In|login_form/i.test(await p.title()), "| title:", await p.title());
+const t = await p.evaluate(()=>document.body.innerText);
+const i = t.indexOf("Links");
+console.log("\n--- LINKS SECTION ---");
+console.log(t.slice(i, i+400));
+const ig = [...t.matchAll(/instagram\.com\/[A-Za-z0-9_.]{2,30}/gi)].map(m=>m[0]);
+const tw = [...t.matchAll(/(?:twitter|x)\.com\/[A-Za-z0-9_]{2,30}/gi)].map(m=>m[0]);
+console.log("\nINSTAGRAM:", ig.length?[...new Set(ig)]:"(none)");
+console.log("TWITTER/X:", tw.length?[...new Set(tw)]:"(none)");
+await b.close();

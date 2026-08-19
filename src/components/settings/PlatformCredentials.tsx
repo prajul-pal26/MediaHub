@@ -446,6 +446,8 @@ function PlatformDetailModal({
     if (existingCred) {
       for (const field of config.fields) {
         if (field.type === "id") initial[field.key] = existingCred.client_id || "";
+        // Pre-fill the saved secret so the eye-toggle can reveal the real value.
+        if (field.type === "secret") initial[field.key] = existingCred.client_secret || "";
       }
       if (config.extraFields && existingCred.metadata) {
         for (const ef of config.extraFields) {

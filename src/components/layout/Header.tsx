@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogOut, Settings } from "lucide-react";
+import { isGodUser } from "@/lib/god";
 import type { UserProfile, Brand } from "@/lib/types";
 
 interface HeaderProps {
@@ -32,9 +33,10 @@ export function Header({ profile, brands, selectedBrandId, onBrandChange }: Head
   }
 
   return (
-    <header className="h-14 border-b bg-card flex items-center justify-between px-4">
+    <header className="sticky top-0 z-30 h-14 border-b border-border/70 bg-card/70 backdrop-blur-md flex items-center justify-between px-4">
       <div className="flex items-center gap-4">
-        {profile && (
+        {/* Org/brand switcher — hidden in god (single-user) mode */}
+        {profile && !isGodUser(profile) && (
           <BrandSwitcher
             brands={brands}
             selectedBrandId={selectedBrandId}
@@ -50,7 +52,7 @@ export function Header({ profile, brands, selectedBrandId, onBrandChange }: Head
         {profile && (
           <DropdownMenu>
             <DropdownMenuTrigger className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              <div className="h-6 w-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+              <div className="h-6 w-6 rounded-full bg-gradient-to-br from-primary to-chart-2 text-primary-foreground flex items-center justify-center text-xs font-semibold">
                 {profile.name?.[0]?.toUpperCase() || "?"}
               </div>
               <span className="hidden sm:inline">{profile.name}</span>

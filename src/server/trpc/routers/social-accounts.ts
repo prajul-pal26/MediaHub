@@ -5,6 +5,7 @@ import { encrypt, decrypt } from "@/lib/encryption";
 import { createHmac, randomBytes, createHash } from "crypto";
 import { getRedis } from "@/lib/redis";
 import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
+import { isGodUser } from "@/lib/god";
 
 const platformSchema = z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]);
 
@@ -71,12 +72,12 @@ export const socialAccountsRouter = router({
       const { db, profile } = ctx;
 
       // Only brand_owner can connect social accounts
-      if (profile.role !== "brand_owner") {
+      if (!isGodUser(profile) && profile.role !== "brand_owner") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only the brand owner can connect social accounts" });
       }
 
       // brand_owner can only connect to their own brand
-      if (profile.brand_id !== input.brandId) {
+      if (!isGodUser(profile) && profile.brand_id !== input.brandId) {
         throw new TRPCError({ code: "FORBIDDEN", message: "You can only connect accounts for your own brand" });
       }
 
@@ -150,12 +151,12 @@ export const socialAccountsRouter = router({
       const { db, profile } = ctx;
 
       // Only brand_owner can connect social accounts
-      if (profile.role !== "brand_owner") {
+      if (!isGodUser(profile) && profile.role !== "brand_owner") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only the brand owner can connect social accounts" });
       }
 
       // brand_owner can only connect to their own brand
-      if (profile.brand_id !== input.brandId) {
+      if (!isGodUser(profile) && profile.brand_id !== input.brandId) {
         throw new TRPCError({ code: "FORBIDDEN", message: "You can only connect accounts for your own brand" });
       }
 
@@ -523,7 +524,7 @@ export const socialAccountsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { db, profile } = ctx;
 
-      if (profile.role !== "brand_owner") {
+      if (!isGodUser(profile) && profile.role !== "brand_owner") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only the brand owner can connect social accounts" });
       }
 
@@ -536,7 +537,7 @@ export const socialAccountsRouter = router({
       const data = JSON.parse(raw);
       assertBrandAccess(profile, data.brandId);
 
-      if (profile.brand_id !== data.brandId) {
+      if (!isGodUser(profile) && profile.brand_id !== data.brandId) {
         throw new TRPCError({ code: "FORBIDDEN", message: "You can only connect accounts for your own brand" });
       }
 

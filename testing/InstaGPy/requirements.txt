@@ -1,0 +1,8 @@
+beautifulsoup4
+bs4
+certifi
+emoji
+lxml
+PySocks
+requests
+urllib3

@@ -1,0 +1,138 @@
+[06:07:13] === Instagram roster run ===
+[06:07:13] targets=131  posts_per_mla=10  concurrency=5
+[06:07:22] OK    1/131 ac_no=1 Umar Ali Khan — ok posts=10 comments=159 8.3s 8 reels
+[06:07:27] FAIL  2/131 ac_no=2 Mukesh Choudhary — Instagram returned HTTP 400
+[06:07:35] OK    3/131 ac_no=6 Devender Kumar Nim — ok posts=10 comments=64 3.1s 1 reels
+[06:07:45] OK    4/131 ac_no=7 Kirat Singh — ok posts=10 comments=91 5.2s 7 reels
+[06:07:54] OK    5/131 ac_no=14 Kapil Dev Agarwal — ok posts=10 comments=56 3.8s 9 reels
+[06:08:00] FAIL  6/131 ac_no=23 Swami Omvesh — Instagram returned HTTP 400
+[06:08:09] OK    7/131 ac_no=24 Ram Avatar Singh Saini — ok posts=10 comments=33 3.9s 6 reels
+[06:08:24] OK    8/131 ac_no=26 Navab Jan — ok posts=10 comments=253 10.3s 8 reels
+[06:08:29] FAIL  9/131 ac_no=27 Mohd. Nasir Qureshi — Instagram returned HTTP 400
+[06:08:43] OK    10/131 ac_no=29 Thakur Ramveer Singh — ok posts=10 comments=281 8.2s 8 reels
+[06:08:54] OK    11/131 ac_no=31 Gulab Devi — ok posts=10 comments=221 6.4s 6 reels
+[06:09:00] FAIL  12/131 ac_no=32 Pinki Singh Yadav — Instagram returned HTTP 400
+[06:09:10] OK    13/131 ac_no=33 Iqbal Mahmood — ok posts=10 comments=114 5.3s 4 reels
+[06:09:32] OK    14/131 ac_no=34 Shafeek Ansari — ok posts=10 comments=555 17.4s 7 reels
+[06:09:38] FAIL  15/131 ac_no=36 Baldev Singh Aulakh — Instagram returned HTTP 400
+[06:10:39] OK    16/131 ac_no=39 Rajeev Kumar Tarara — ok posts=10 comments=1777 55.9s 4 reels
+[06:10:55] OK    17/131 ac_no=41 Mehboob Ali — ok posts=10 comments=309 11.3s 6 reels
+[06:11:03] OK    18/131 ac_no=45 Dinesh Khatik — ok posts=10 comments=7 3.4s 3 reels
+[06:11:16] OK    19/131 ac_no=46 Shahid Manzoor — ok posts=10 comments=188 7.3s 7 reels
+[06:11:24] OK    20/131 ac_no=47 Amit Agrawal — ok posts=10 comments=31 3.4s 9 reels
+[06:11:36] OK    21/131 ac_no=51 Krishan Pal Malik — ok posts=10 comments=63 7s 3 reels
+[06:11:41] FAIL  22/131 ac_no=55 Sunil Kumar Sharma — Instagram returned HTTP 400
+[06:11:47] FAIL  23/131 ac_no=58 Dharmesh Singh Tomar — Instagram returned HTTP 400
+[06:11:55] OK    24/131 ac_no=60 Harendra Singh — ok posts=10 comments=65 3.2s 4 reels
+[06:12:01] FAIL  25/131 ac_no=67 Sanjay Kumar Sharma — User "@sanjays303" not found
+[06:12:06] FAIL  26/131 ac_no=69 Anil Sharma — User "@anilsharma_mla" not found
+[06:12:11] FAIL  27/131 ac_no=73 Sandeep Kumar Singh — Instagram returned HTTP 400
+[06:12:20] OK    28/131 ac_no=74 Ravendra Pal Singh — ok posts=10 comments=5 3.2s 3 reels
+[06:12:25] FAIL  29/131 ac_no=76 Mukta Sanjeev Raja — Instagram returned HTTP 400
+[06:12:36] OK    30/131 ac_no=78 Anjula Singh Mahor — ok posts=10 comments=57 5.6s 2 reels
+[06:12:41] FAIL  31/131 ac_no=86 Dr. Dharmpal Singh — Instagram returned HTTP 400
+[06:12:48] FAIL  32/131 ac_no=107 Jaiveer Singh — Instagram returned HTTP 400
+[06:12:56] OK    33/131 ac_no=109 Brajesh Katheriya — ok posts=10 comments=2 2.7s 1 reels
+[06:13:01] FAIL  34/131 ac_no=113 Brajesh Yadav — User "@brajesh_yadav_mla_official_113" not found
+[06:13:11] OK    35/131 ac_no=124 Dr Arun Kumar Saxena — ok posts=10 comments=45 5.3s 2 reels
+[06:13:19] OK    36/131 ac_no=128 Jaydrath [Pravaktanand] — ok posts=10 comments=7 2.8s 3 reels
+[06:13:39] OK    37/131 ac_no=130 Vivek Kumar Verma — ok posts=10 comments=225 14.7s 5 reels
+[06:13:44] FAIL  38/131 ac_no=132 Hari Prakash Verma — User "@hariprakash1495" not found
+[06:13:51] OK    39/131 ac_no=133 Salona Kushwaha — ok posts=1 comments=0 1.4s 0 reels
+[06:13:56] FAIL  40/131 ac_no=137 Harvinder Kumar Sahni [Romi Sahani] — No profile data returned for "@romisahniofficial"
+[06:14:04] OK    41/131 ac_no=138 Shashank Verma — ok posts=10 comments=3 2.6s 0 reels
+[06:14:21] OK    42/131 ac_no=142 Yogesh Verma — ok posts=10 comments=486 12.6s 8 reels
+[06:14:29] OK    43/131 ac_no=148 Anil Kumar Verma — ok posts=10 comments=1 3.2s 0 reels
+[06:14:38] OK    44/131 ac_no=151 Asha Maurya — ok posts=10 comments=5 3.1s 2 reels
+[06:14:43] FAIL  45/131 ac_no=152 Manish Rawat — Instagram returned HTTP 400
+[06:14:48] FAIL  46/131 ac_no=154 Madhavendra Pratap Singh — User "@madhavendra_pratap_singh_ranu" not found
+[06:15:01] OK    47/131 ac_no=156 Nitin Agarwal — ok posts=10 comments=212 7.3s 6 reels
+[06:15:06] FAIL  48/131 ac_no=157 Shyam Prakash — User "@shyamprakashmla" not found
+[06:15:14] OK    49/131 ac_no=162 Shrikant Katiyar — ok posts=10 comments=8 2.5s 1 reels
+[06:15:19] FAIL  50/131 ac_no=167 Anil Singh — User "@anilsingh_bjp" not found
+[06:15:25] FAIL  51/131 ac_no=171 Armaan Khan — Instagram returned HTTP 400
+[06:15:34] OK    52/131 ac_no=173 O P Srivastava — ok posts=10 comments=7 4.3s 4 reels
+[06:15:39] FAIL  53/131 ac_no=176 Amresh Kumar Rawat — User "@amareshkumarbjp1" not found
+[06:15:52] OK    54/131 ac_no=178 Mayankeshwar Sharan Singh — ok posts=10 comments=102 7.6s 1 reels
+[06:16:03] OK    55/131 ac_no=180 Aditi Singh — ok posts=10 comments=236 6.4s 4 reels
+[06:16:15] OK    56/131 ac_no=183 Dr. Manoj Kumar Pandey — ok posts=10 comments=321 6.2s 8 reels
+[06:16:24] OK    57/131 ac_no=186 Maharaji Prajapati — ok posts=10 comments=68 4.2s 7 reels
+[06:16:31] OK    58/131 ac_no=191 Rajesh Kumar Gautam — ok posts=10 comments=25 2.5s 3 reels
+[06:16:45] OK    59/131 ac_no=196 Archana Pandey — ok posts=10 comments=165 8.5s 8 reels
+[06:16:51] WARN  60/131 ac_no=197 Kailash Rajput — no_posts posts=0 comments=0 0.844s feed returned nothing
+[06:16:56] FAIL  61/131 ac_no=201 Raghvendra Kumar Singh — Instagram returned HTTP 400
+[06:17:33] OK    62/131 ac_no=204 Gudiya Katheriya — ok posts=10 comments=934 31.6s 6 reels
+[06:17:38] FAIL  63/131 ac_no=208 Rakesh Sachan — Instagram returned HTTP 400
+[06:17:50] OK    64/131 ac_no=212 Surendra Maithani — ok posts=10 comments=40 6.5s 5 reels
+[06:18:04] OK    65/131 ac_no=215 Mahesh Trivedi — ok posts=10 comments=123 8.9s 2 reels
+[06:18:13] OK    66/131 ac_no=216 Mohammad Hasan Roomi — ok posts=10 comments=39 4s 4 reels
+[06:18:18] FAIL  67/131 ac_no=217 Satish Mahana — Instagram returned HTTP 400
+[06:18:32] OK    68/131 ac_no=228 Dr. Manoj Kumar Prajapati — ok posts=10 comments=84 8.1s 1 reels
+[06:18:40] OK    69/131 ac_no=230 Rakesh Kumar Goswami — ok posts=10 comments=39 3s 1 reels
+[06:18:47] OK    70/131 ac_no=232 Ramkesh Nishad — ok posts=10 comments=29 2.8s 0 reels
+[06:19:05] OK    71/131 ac_no=234 Ommani Varma — ok posts=10 comments=357 12.4s 7 reels
+[06:19:31] OK    72/131 ac_no=235 Prakash Dwivedi — ok posts=10 comments=674 21.6s 4 reels
+[06:19:53] OK    73/131 ac_no=236 Anil Pradhan — ok posts=10 comments=484 16.7s 4 reels
+[06:20:07] OK    74/131 ac_no=237 Avinash Chandra Dwivedi — ok posts=10 comments=152 8.8s 9 reels
+[06:20:12] FAIL  75/131 ac_no=239 Jay Kumar Singh Jaiki — Instagram returned HTTP 400
+[06:20:18] FAIL  76/131 ac_no=242 Usha Maurya — Instagram returned HTTP 400
+[06:21:03] OK    77/131 ac_no=246 Raghuraj Pratap Singh — ok posts=10 comments=2023 39.7s 4 reels
+[06:21:11] OK    78/131 ac_no=248 Rajendra Kumar — ok posts=10 comments=5 3s 0 reels
+[06:24:43] OK    79/131 ac_no=251 Dr. Pallavi Patel — ok posts=10 comments=3700 207s 10 reels
+[06:25:20] OK    80/131 ac_no=252 Indrajeet Saroj — ok posts=10 comments=404 32.3s 3 reels
+[06:25:29] OK    81/131 ac_no=253 Pooja Pal — ok posts=10 comments=40 4.2s 1 reels
+[06:25:37] OK    82/131 ac_no=256 Deepak Patel — ok posts=10 comments=4 2.7s 0 reels
+[06:25:42] FAIL  83/131 ac_no=259 Sandeep Singh — No profile data returned for "@sandeepatelmla"
+[06:25:53] OK    84/131 ac_no=260 Piyush Ranjan Nishad — ok posts=10 comments=24 5.5s 1 reels
+[06:26:01] OK    85/131 ac_no=267 Fareed Mahfooz Kidwai — ok posts=10 comments=10 3.6s 0 reels
+[06:26:17] OK    86/131 ac_no=270 Satish Chandra Sharma — ok posts=10 comments=256 10.9s 1 reels
+[06:26:26] OK    87/131 ac_no=272 Dinesh Rawat — ok posts=10 comments=35 3.3s 0 reels
+[06:26:44] OK    88/131 ac_no=273 Chandrabhanu Paswan — ok posts=10 comments=341 13.9s 3 reels
+[06:26:50] FAIL  89/131 ac_no=274 Dr. Amit Singh Chauhan — Instagram returned HTTP 400
+[06:26:55] FAIL  90/131 ac_no=278 Ram Murti Verma — User "@rammurtivermasp" not found
+[06:27:03] OK    91/131 ac_no=282 Saroj Sonkar — ok posts=10 comments=28 2.9s 2 reels
+[06:27:14] OK    92/131 ac_no=287 Subhash Tripathi — ok posts=10 comments=116 5.7s 6 reels
+[06:27:22] OK    93/131 ac_no=293 Rampratap Verma - Shashikant Verma — ok posts=10 comments=6 2.9s 0 reels
+[06:27:29] OK    94/131 ac_no=302 Vinay Verma — ok posts=10 comments=0 2.5s 0 reels
+[06:27:43] OK    95/131 ac_no=305 Mata Prasad Pandey — ok posts=10 comments=80 8.3s 0 reels
+[06:28:19] OK    96/131 ac_no=308 Kavindra Chaudhary - Atul — ok posts=10 comments=654 31.5s 2 reels
+[06:28:25] FAIL  97/131 ac_no=310 Mahendra Nath Yadav — Instagram returned HTTP 400
+[06:28:33] OK    98/131 ac_no=313 Ankur Raj Tiwari — ok posts=10 comments=101 3.5s 9 reels
+[06:28:42] OK    99/131 ac_no=316 Rishi Tripathi — ok posts=10 comments=31 4.1s 5 reels
+[06:28:50] OK    100/131 ac_no=318 Jai Mangal Kanojiya — ok posts=10 comments=10 2.7s 2 reels
+[06:28:58] OK    101/131 ac_no=319 Gyanendra Singh — ok posts=10 comments=6 3.3s 6 reels
+[06:29:07] OK    102/131 ac_no=320 Fateh Bahadur Singh — ok posts=10 comments=60 3.7s 0 reels
+[06:29:12] FAIL  103/131 ac_no=326 Sarvan Kumar Nishad — User "@sarvan_nishad___personal" not found
+[06:29:22] OK    104/131 ac_no=329 Vivekanand Pandey — ok posts=10 comments=70 5.3s 9 reels
+[06:29:43] OK    105/131 ac_no=330 Manish Kumar - Mantu — ok posts=10 comments=580 16s 7 reels
+[06:29:52] OK    106/131 ac_no=331 Asim Kumar — ok posts=10 comments=8 3.7s 7 reels
+[06:30:01] OK    107/131 ac_no=333 P. N. Pathak — ok posts=10 comments=20 4.2s 8 reels
+[06:30:24] OK    108/131 ac_no=334 Mohan Verma — ok posts=10 comments=270 18.2s 7 reels
+[06:30:36] OK    109/131 ac_no=335 Vinay Prakash Gond — ok posts=10 comments=59 6.4s 2 reels
+[06:30:41] FAIL  110/131 ac_no=343 Dr. Sangram Singh Yadav — Instagram returned HTTP 400
+[06:30:56] OK    111/131 ac_no=350 Kamlakant Rajbhar - Pappu — ok posts=10 comments=346 10s 7 reels
+[06:31:04] OK    112/131 ac_no=352 Puja Saroj — ok posts=10 comments=5 2.9s 6 reels
+[06:31:13] OK    113/131 ac_no=353 Ram Bilas Chauhan — ok posts=10 comments=3 3.6s 9 reels
+[06:31:21] OK    114/131 ac_no=355 Rajendra Kumar — ok posts=10 comments=9 2.6s 0 reels
+[06:35:38] OK    115/131 ac_no=356 Abbas Ansari — ok posts=10 comments=11105 252.6s 1 reels
+[06:35:46] OK    116/131 ac_no=359 Ziyauddin Rizvi — ok posts=10 comments=12 3.2s 2 reels
+[06:35:52] FAIL  117/131 ac_no=360 Sangam Singh Yadav — Instagram returned HTTP 400
+[06:35:57] FAIL  118/131 ac_no=361 Daya Shankar Singh — User "@dayashankar.singhbjp" not found
+[06:36:03] FAIL  119/131 ac_no=363 Jai Prakash Anchal — Instagram returned HTTP 400
+[06:36:11] OK    120/131 ac_no=365 Ramesh Singh — ok posts=10 comments=19 2.8s 0 reels
+[06:36:34] OK    121/131 ac_no=369 Dr. Ragini Sonkar — ok posts=10 comments=595 18.7s 3 reels
+[06:36:41] OK    122/131 ac_no=370 Dr. R.K. Patel — ok posts=2 comments=3 1.8s 1 reels
+[06:36:47] FAIL  123/131 ac_no=372 Tufani Saroj — Instagram returned HTTP 400
+[06:37:09] OK    124/131 ac_no=374 Ankit Bharti — ok posts=10 comments=266 17.1s 6 reels
+[06:37:21] OK    125/131 ac_no=378 Suhaib - Mannu Ansari — ok posts=10 comments=162 7.1s 1 reels
+[06:37:26] FAIL  126/131 ac_no=387 Dr. Sunil Patel — Instagram returned HTTP 400
+[06:37:35] OK    127/131 ac_no=388 Ravindra Jaiswal — ok posts=10 comments=47 3.3s 0 reels
+[06:37:46] OK    128/131 ac_no=393 Vipul Dubey — ok posts=10 comments=140 6s 8 reels
+[06:37:54] OK    129/131 ac_no=395 Rinki Kol — ok posts=10 comments=8 3.6s 4 reels
+[06:38:02] OK    130/131 ac_no=400 Dr. Anil Kumar Maurya — ok posts=10 comments=17 2.9s 1 reels
+[06:38:11] OK    131/131 ac_no=402 Sanjeev Kumar Gond — ok posts=10 comments=27 3.7s 8 reels
+[06:38:11] 
+=== DONE in 31.0 min ===
+[06:38:11]   ok=92 skipped=0 private=0 not_found=11 no_posts=1 error=27
+[06:38:11]   posts=903  comments=30907
+[06:38:11]   summary: cjp_output/ig_roster_summary.csv

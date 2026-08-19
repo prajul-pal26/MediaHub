@@ -66,32 +66,53 @@ const modelsByProvider: Record<Provider, { value: string; label: string }[]> = {
   custom: [],
 };
 
+type UserConfig = {
+  id: string;
+  provider: string;
+  default_model: string | null;
+  base_url: string | null;
+  api_key_masked: string;
+  api_key?: string;
+  label?: string;
+  is_active?: boolean;
+};
+
 export function PersonalLlmKey() {
-  const [showDialog, setShowDialog] = useState(false);
+  const [dialog, setDialog] = useState<UserConfig | "new" | null>(null);
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const { data: configs = [], isLoading } = trpc.llm.listConfigs.useQuery();
   const { data: usageData } = trpc.llm.getUsageSummary.useQuery();
   const utils = trpc.useUtils();
 
+  const refresh = () => {
+    utils.llm.listConfigs.invalidate();
+    utils.llm.getActiveConfig.invalidate();
+  };
+
   const deleteMutation = trpc.llm.deleteConfig.useMutation({
     onSuccess: () => {
-      toast.success("Personal LLM key removed");
-      utils.llm.listConfigs.invalidate();
-      utils.llm.getActiveConfig.invalidate();
+      toast.success("Key removed");
+      refresh();
     },
     onError: (e) => toast.error(e.message),
   });
 
-  const personalConfig = configs.find((c: any) => c.scope === "user");
+  const activateMutation = trpc.llm.setActiveConfig.useMutation({
+    onSuccess: () => {
+      toast.success("Active key switched");
+      refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const userConfigs = (configs as any[]).filter(
+    (c) => c.scope === "user"
+  ) as UserConfig[];
   const summary = usageData?.summary;
 
-  function handleRemove() {
-    if (!personalConfig) return;
-    if (
-      confirm(
-        "Remove your personal LLM key? You will fall back to the org/brand LLM."
-      )
-    ) {
-      deleteMutation.mutate({ id: personalConfig.id });
+  function handleRemove(cfg: UserConfig) {
+    if (confirm(`Remove the key for ${cfg.label || "this account"}?`)) {
+      deleteMutation.mutate({ id: cfg.id });
     }
   }
 
@@ -107,111 +128,140 @@ export function PersonalLlmKey() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Key className="h-5 w-5 text-primary" />
-        <div>
-          <h2 className="text-lg font-semibold">Personal LLM Key</h2>
-          <p className="text-sm text-muted-foreground">
-            Configure your own LLM API key for chat
-          </p>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Key className="h-5 w-5 text-primary" />
+          <div>
+            <h2 className="text-lg font-semibold">Personal LLM Keys</h2>
+            <p className="text-sm text-muted-foreground">
+              Chat pools all saved keys, load-balances across them, and auto-switches
+              when one hits its free limit.
+            </p>
+          </div>
         </div>
+        <Button size="sm" onClick={() => setDialog("new")}>
+          <Plus className="h-3.5 w-3.5 mr-1.5" /> Add key
+        </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-4">
-          {personalConfig ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-4 text-sm">
-                <div>
-                  <p className="text-muted-foreground text-xs">Provider</p>
-                  <p className="font-medium">
-                    {providerLabels[personalConfig.provider as Provider] ||
-                      personalConfig.provider}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground text-xs">Model</p>
-                  <p className="font-medium">
-                    {personalConfig.default_model || "Default"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground text-xs">API Key</p>
-                  <p className="font-mono text-xs">
-                    {personalConfig.api_key_masked}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Badge variant="default">Configured</Badge>
-              </div>
-
-              {summary && (
-                <div className="grid grid-cols-2 gap-3 pt-2 border-t text-sm">
-                  <div>
-                    <p className="text-muted-foreground text-xs">
-                      Requests Today
-                    </p>
-                    <p className="font-semibold">
-                      {summary.daily_requests}
-                    </p>
+      {userConfigs.length === 0 ? (
+        <Card>
+          <CardContent className="text-center py-8 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              No personal LLM key configured.
+            </p>
+            <Button size="sm" onClick={() => setDialog("new")}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" /> Add your first key
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {userConfigs.map((cfg) => {
+            const show = !!revealed[cfg.id];
+            return (
+              <Card key={cfg.id} className={cfg.is_active ? "border-primary" : undefined}>
+                <CardContent className="pt-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-medium truncate">
+                          {cfg.label && cfg.label !== "Personal"
+                            ? cfg.label
+                            : "Personal key"}
+                        </p>
+                        {cfg.is_active ? (
+                          <Badge variant="default" className="gap-1">
+                            <CheckCircle2 className="h-3 w-3" /> Active
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">Saved</Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {providerLabels[cfg.provider as Provider] || cfg.provider}
+                        {" · "}
+                        {cfg.default_model || "default model"}
+                      </p>
+                    </div>
+                    {!cfg.is_active && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => activateMutation.mutate({ id: cfg.id })}
+                        disabled={activateMutation.isPending}
+                      >
+                        Use this key
+                      </Button>
+                    )}
                   </div>
-                  <div>
-                    <p className="text-muted-foreground text-xs">
-                      Requests This Month
-                    </p>
-                    <p className="font-semibold">
-                      {summary.monthly_requests}
-                    </p>
-                  </div>
-                </div>
-              )}
 
-              <div className="flex gap-2 pt-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setShowDialog(true)}
-                >
-                  <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                  Edit My LLM Key
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="text-red-500 hover:text-red-700"
-                  onClick={handleRemove}
-                  disabled={deleteMutation.isPending}
-                >
-                  <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-                  Remove
-                </Button>
-              </div>
+                  <div className="flex items-center gap-1.5">
+                    <p className="font-mono text-xs break-all text-muted-foreground">
+                      {show ? cfg.api_key || cfg.api_key_masked : cfg.api_key_masked}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRevealed((r) => ({ ...r, [cfg.id]: !r[cfg.id] }))
+                      }
+                      className="text-muted-foreground hover:text-foreground shrink-0"
+                      aria-label={show ? "Hide key" : "Show key"}
+                    >
+                      {show ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 pt-1">
+                    <Button size="sm" variant="outline" onClick={() => setDialog(cfg)}>
+                      <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-red-500 hover:text-red-700"
+                      onClick={() => handleRemove(cfg)}
+                      disabled={deleteMutation.isPending}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Remove
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {summary && (
+        <Card>
+          <CardContent className="grid grid-cols-2 gap-3 pt-4 text-sm">
+            <div>
+              <p className="text-muted-foreground text-xs">Requests Today</p>
+              <p className="font-semibold">{summary.daily_requests}</p>
             </div>
-          ) : (
-            <div className="text-center py-4 space-y-3">
-              <p className="text-sm text-muted-foreground">
-                No personal LLM key configured.
-              </p>
-              <Button size="sm" onClick={() => setShowDialog(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                Add My LLM Key
-              </Button>
+            <div>
+              <p className="text-muted-foreground text-xs">Requests This Month</p>
+              <p className="font-semibold">{summary.monthly_requests}</p>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       <p className="text-xs text-muted-foreground">
-        Your personal key takes priority over the org/brand LLM.
+        Your saved keys take priority over the org/brand LLM. The active key is tried
+        first; the rest are automatic failovers if it&apos;s rate-limited.
       </p>
 
-      {showDialog && (
+      {dialog !== null && (
         <PersonalKeyDialog
-          open={showDialog}
-          onClose={() => setShowDialog(false)}
-          existingConfig={personalConfig}
+          open={dialog !== null}
+          onClose={() => setDialog(null)}
+          existingConfig={dialog === "new" ? null : dialog}
         />
       )}
     </div>
@@ -233,14 +283,22 @@ function PersonalKeyDialog({
     default_model: string | null;
     base_url: string | null;
     api_key_masked: string;
+    api_key?: string;
+    label?: string;
+    is_active?: boolean;
   } | null;
 }) {
   const [provider, setProvider] = useState<Provider>(
     (existingConfig?.provider as Provider) || "openrouter"
   );
-  const [apiKey, setApiKey] = useState("");
+  // Pre-fill the real key so the eye-toggle reveals it and edits don't wipe it.
+  const [apiKey, setApiKey] = useState(existingConfig?.api_key || "");
+  const [baseUrl, setBaseUrl] = useState(existingConfig?.base_url || "");
   const [showKey, setShowKey] = useState(false);
   const [model, setModel] = useState(existingConfig?.default_model || "");
+  const [accountEmail, setAccountEmail] = useState(
+    existingConfig?.label && existingConfig.label !== "Personal" ? existingConfig.label : ""
+  );
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
 
@@ -262,8 +320,11 @@ function PersonalKeyDialog({
         scope: "user",
         provider,
         api_key: apiKey || "unchanged",
+        base_url: provider === "custom" ? baseUrl || undefined : undefined,
         default_model: model || undefined,
-        label: "Personal",
+        label: accountEmail.trim() || "Personal",
+        // New keys become active (switch to it); edits keep current state.
+        is_active: existingConfig ? existingConfig.is_active ?? true : true,
       });
       toast.success("Personal LLM key saved");
       utils.llm.listConfigs.invalidate();
@@ -355,6 +416,36 @@ function PersonalKeyDialog({
             </div>
           </div>
 
+          <div className="space-y-2">
+            <Label>Account email</Label>
+            <Input
+              type="email"
+              value={accountEmail}
+              onChange={(e) => setAccountEmail(e.target.value)}
+              placeholder="agent@cotgen.in"
+              disabled={saving}
+            />
+            <p className="text-xs text-muted-foreground">
+              The account this API key was created under — shown for reference.
+            </p>
+          </div>
+
+          {provider === "custom" && (
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <Input
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://integrate.api.nvidia.com/v1"
+                disabled={saving}
+              />
+              <p className="text-xs text-muted-foreground">
+                OpenAI-compatible endpoint. For NVIDIA NIM use{" "}
+                <code className="text-[11px]">https://integrate.api.nvidia.com/v1</code>.
+              </p>
+            </div>
+          )}
+
           {models.length > 0 ? (
             <div className="space-y-2">
               <Label>Default Model</Label>
@@ -381,9 +472,17 @@ function PersonalKeyDialog({
               <Input
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="Enter model identifier"
+                placeholder="meta/llama-3.1-70b-instruct"
                 disabled={saving}
               />
+              <p className="text-xs text-muted-foreground">
+                Use a model that supports tool-calling and is available on your tier —{" "}
+                <code className="text-[11px]">meta/llama-3.1-70b-instruct</code> (recommended)
+                or <code className="text-[11px]">meta/llama-3.1-8b-instruct</code> (fastest).
+                Note: heavy models like <code className="text-[11px]">llama-3.3-70b</code> /
+                <code className="text-[11px]">deepseek-v4</code> often time out or 503 on the
+                free tier.
+              </p>
             </div>
           ) : null}
 

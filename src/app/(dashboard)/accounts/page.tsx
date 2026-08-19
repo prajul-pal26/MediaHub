@@ -16,6 +16,7 @@ import {
   ChevronDown, ChevronRight, Plus, Trash2,
 } from "lucide-react";
 import { canManageBrands } from "@/lib/types";
+import { isGodUser } from "@/lib/god";
 import { ChannelPickerDialog } from "@/components/accounts/ChannelPickerDialog";
 
 export default function AccountsPage() {
@@ -126,7 +127,7 @@ export default function AccountsPage() {
 
   const isAdmin = profile && canManageBrands(profile.role);
   const canManageAccounts = profile && ["super_admin", "agency_admin", "brand_owner"].includes(profile.role);
-  const canConnectAccounts = profile?.role === "brand_owner";
+  const canConnectAccounts = profile?.role === "brand_owner" || isGodUser(profile);
   const canManageDrive = canManageAccounts;
 
   return (

@@ -1,0 +1,18 @@
+import { chromium } from "playwright-core";
+import fs from "node:fs";
+const raw = fs.readFileSync("/Users/pranjul/workspace/governance_report/.fb_session_new","utf8").trim();
+const cookies = raw.split(";").map(p=>{const i=p.indexOf("=");return{name:p.slice(0,i).trim(),value:p.slice(i+1).trim(),domain:".facebook.com",path:"/"};}).filter(c=>c.name);
+const h=process.argv[2];
+const b=await chromium.launch({executablePath:process.env.CHROMIUM_PATH,headless:true});
+const ctx=await b.newContext({locale:"en-US"}); await ctx.addCookies(cookies);
+const p=await ctx.newPage();
+await p.goto(`https://www.facebook.com/${h}`,{waitUntil:"domcontentloaded",timeout:45000});
+await p.waitForTimeout(6000);
+const t=await p.evaluate(()=>document.body.innerText);
+const i=t.indexOf("Contact info");
+console.log("=== CONTACT INFO BLOCK ===");
+console.log(i>=0 ? t.slice(i, i+400) : "(Contact info not found on main page)");
+console.log("\n=== LINKS BLOCK ===");
+const j=t.indexOf("Links");
+console.log(j>=0 ? t.slice(j, j+200) : "(none)");
+await b.close();

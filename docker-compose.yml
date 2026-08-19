@@ -50,7 +50,7 @@ services:
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:postgres@db:5432/supabase?search_path=auth
       GOTRUE_SITE_URL: https://localhost:3443
-      GOTRUE_URI_ALLOW_LIST: ""
+      GOTRUE_URI_ALLOW_LIST: "http://localhost:3010/**,http://localhost:3000/**,https://localhost:3443/**"
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
@@ -63,7 +63,10 @@ services:
       GOTRUE_SMTP_HOST: email
       GOTRUE_SMTP_PORT: "2500"
       GOTRUE_SMTP_SENDER_NAME: MediaHub
-      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${MH_GOOGLE_CLIENT_ID}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${MH_GOOGLE_CLIENT_SECRET}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: http://localhost:54321/auth/v1/callback
     depends_on:
       db:
         condition: service_healthy
@@ -220,7 +223,7 @@ services:
     container_name: mediahub-app
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3010:3000"
     environment:
       # NEXT_PUBLIC_ vars are baked in at build time (see Dockerfile).
       # These runtime vars are for server-side code only.
@@ -231,6 +234,9 @@ services:
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
       NEXT_PUBLIC_APP_URL: https://localhost:3443
+      # Optional rotating proxy for Instagram scraping (from .env). Either name works.
+      INSTA_PROXY: ${INSTA_PROXY:-}
+      ECOURTS_PROXIES: ${ECOURTS_PROXIES:-}
     depends_on:
       db:
         condition: service_healthy
@@ -253,6 +259,9 @@ services:
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
       NEXT_PUBLIC_APP_URL: https://localhost:3443
+      # Optional rotating proxy for Instagram scraping (from .env). Either name works.
+      INSTA_PROXY: ${INSTA_PROXY:-}
+      ECOURTS_PROXIES: ${ECOURTS_PROXIES:-}
     depends_on:
       db:
         condition: service_healthy

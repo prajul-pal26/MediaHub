@@ -4728,6 +4728,188 @@ async function verifyStartup() {
   console.log("  ✓ Comment reply processing (every 30s)");
 }
 
+// ─── Instagram comment harvest ───
+//
+// Long-running (minutes to days), so it lives here rather than in a request.
+// Progress is streamed into insta_comment_runs so the dashboard can poll it,
+// and the run's status doubles as a cooperative cancel flag.
+const instaCommentWorker = new Worker(
+  "insta-comment-harvest",
+  async (job) => {
+    const { runId } = job.data as { runId: string };
+    console.log(`[insta-comment-harvest] starting run ${runId}`);
+
+    const { data: run } = await db().from("insta_comment_runs").select("*").eq("id", runId).maybeSingle();
+    if (!run) {
+      console.warn(`[insta-comment-harvest] run ${runId} not found`);
+      return;
+    }
+
+    const fail = async (message: string) => {
+      await db()
+        .from("insta_comment_runs")
+        .update({ status: "failed", error: message, completed_at: new Date().toISOString() })
+        .eq("id", runId);
+      console.error(`[insta-comment-harvest] ${runId} failed: ${message}`);
+    };
+
+    // Resolve the session the run was created with, falling back to any active one.
+    const { data: sess } = await db()
+      .from("insta_sessions")
+      .select("id, session_id_encrypted, status")
+      .eq("id", run.session_id)
+      .maybeSingle();
+    const encrypted =
+      sess?.session_id_encrypted ??
+      (
+        await db()
+          .from("insta_sessions")
+          .select("session_id_encrypted")
+          .eq("org_id", run.org_id)
+          .eq("status", "active")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      ).data?.session_id_encrypted;
+    if (!encrypted) return fail("No usable Instagram session");
+
+    let session: string;
+    try {
+      session = decrypt(encrypted);
+    } catch {
+      return fail("Instagram session could not be decrypted");
+    }
+
+    const { harvestManyPosts, CommentRateGovernor } = await import(
+      "./src/server/services/instagram/comments"
+    );
+
+    const posts: { mediaId: string; shortcode: string; commentCount: number }[] = run.posts ?? [];
+    if (!posts.length) return fail("Run has no posts");
+
+    const startedAt = Date.now();
+    await db()
+      .from("insta_comment_runs")
+      .update({ status: "running", started_at: new Date().toISOString() })
+      .eq("id", runId);
+
+    const shortcodeFor = new Map(posts.map((p) => [p.mediaId, p.shortcode]));
+    const perPost: Record<string, number> = {};
+    const governor = new CommentRateGovernor();
+    const abort = new AbortController();
+
+    // Cooperative cancel + progress flush, both on the same interval.
+    let lastFlush = 0;
+    const flush = async (force = false) => {
+      if (!force && Date.now() - lastFlush < 3000) return;
+      lastFlush = Date.now();
+      const total = Object.values(perPost).reduce((a, b) => a + b, 0);
+      const secs = (Date.now() - startedAt) / 1000;
+      await db()
+        .from("insta_comment_runs")
+        .update({
+          total_comments: total,
+          throughput_per_sec: secs > 0 ? Math.round((total / secs) * 10) / 10 : null,
+          throttle_count: governor.throttleCount,
+          current_pace_ms: governor.current,
+          progress: { perPost, updatedAt: new Date().toISOString() },
+        })
+        .eq("id", runId);
+    };
+
+    const cancelPoll = setInterval(async () => {
+      const { data } = await db().from("insta_comment_runs").select("status").eq("id", runId).maybeSingle();
+      if (data?.status === "cancelled") {
+        console.log(`[insta-comment-harvest] ${runId} cancelled by user`);
+        abort.abort();
+      }
+    }, 5000);
+
+    try {
+      const { results, totalComments, throttleCount, elapsedMs } = await harvestManyPosts(
+        posts.map((p) => p.mediaId),
+        session,
+        {
+          concurrency: run.concurrency ?? 5,
+          includeReplies: Boolean(run.include_replies),
+          governor,
+          signal: abort.signal,
+          onProgress: ({ mediaId, fetched }) => {
+            perPost[mediaId] = fetched;
+            void flush();
+          },
+        },
+      );
+
+      // Insert in chunks; a single post can carry tens of thousands of rows.
+      let inserted = 0;
+      for (const r of results) {
+        const rows = r.comments.map((c) => ({
+          run_id: runId,
+          org_id: run.org_id,
+          post_media_id: r.mediaId,
+          post_shortcode: shortcodeFor.get(r.mediaId) ?? null,
+          comment_id: c.id,
+          comment_text: c.text,
+          comment_created_at: c.createdAt,
+          comment_likes: c.likeCount,
+          depth: c.depth,
+          parent_comment_id: c.parentId,
+          reply_count: c.replyCount,
+          commenter_username: c.username,
+          commenter_full_name: c.fullName,
+          commenter_user_id: c.userId,
+          commenter_verified: c.isVerified,
+        }));
+        for (let i = 0; i < rows.length; i += 1000) {
+          const chunk = rows.slice(i, i + 1000);
+          const { error } = await db()
+            .from("insta_comments")
+            .upsert(chunk, { onConflict: "run_id,comment_id", ignoreDuplicates: true });
+          if (error) console.error(`[insta-comment-harvest] insert error: ${error.message}`);
+          else inserted += chunk.length;
+        }
+      }
+
+      const expected = run.expected_comments || posts.reduce((a, p) => a + p.commentCount, 0);
+      const cancelled = abort.signal.aborted;
+      const requestCount = results.reduce((a, r) => a + r.requestCount, 0);
+      const secs = elapsedMs / 1000;
+
+      await db()
+        .from("insta_comment_runs")
+        .update({
+          status: cancelled ? "cancelled" : totalComments >= expected * 0.9 ? "completed" : "partial",
+          total_comments: totalComments,
+          coverage_pct: expected > 0 ? Math.round((totalComments / expected) * 1000) / 10 : null,
+          request_count: requestCount,
+          throttle_count: throttleCount,
+          throughput_per_sec: secs > 0 ? Math.round((totalComments / secs) * 10) / 10 : null,
+          current_pace_ms: governor.current,
+          duration_ms: elapsedMs,
+          progress: { perPost, updatedAt: new Date().toISOString() },
+          completed_at: new Date().toISOString(),
+          error: results.find((r) => r.error)?.error ?? null,
+        })
+        .eq("id", runId);
+
+      console.log(
+        `[insta-comment-harvest] ${runId} done: ${totalComments} comments (${inserted} stored) in ${(secs / 60).toFixed(1)}min, ${throttleCount} throttles`,
+      );
+    } catch (err: any) {
+      await fail(err?.message ?? "harvest crashed");
+    } finally {
+      clearInterval(cancelPoll);
+      await flush(true).catch(() => {});
+    }
+  },
+  { connection: redis, concurrency: 1 },
+);
+
+instaCommentWorker.on("failed", (job, err) => {
+  console.error(`[insta-comment-harvest] job ${job?.id} failed:`, err?.message);
+});
+
 console.log("Worker starting...");
 verifyStartup().then(() => {
   console.log("Worker ready. Listening for jobs...");
@@ -4745,6 +4927,7 @@ process.on("SIGTERM", async () => {
   await competitorFetchWorker.close();
   await commentSyncWorker.close();
   await commentReplyWorker.close();
+  await instaCommentWorker.close();
   await redis.quit();
   process.exit(0);
 });

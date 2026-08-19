@@ -49,3 +49,7 @@ prod-ca-2021.crt
 
 # SSL certificates (generated locally by mkcert)
 *.pem
+
+# Local Caddy dev CA (machine-specific, do not commit)
+caddy-local-ca.crt
+/UpGrad

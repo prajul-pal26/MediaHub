@@ -22,6 +22,9 @@ export const credentialsRouter = router({
       id: cred.id,
       platform: cred.platform,
       client_id: cred.client_id_encrypted ? decrypt(cred.client_id_encrypted) : "",
+      // Super-admin-only endpoint: return the full secret so the studio owner can
+      // view/copy their own configured credentials (eye-toggle reveal in the UI).
+      client_secret: cred.client_secret_encrypted ? decrypt(cred.client_secret_encrypted) : "",
       client_secret_masked: cred.client_secret_encrypted
         ? "••••••••" + decrypt(cred.client_secret_encrypted).slice(-4)
         : "",
