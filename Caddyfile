@@ -2,7 +2,34 @@
 # Caddy auto-generates a self-signed cert with `tls internal`.
 # Browser will show a one-time warning — click through to accept.
 
+# Plain HTTP is deliberately separated from the TLS listener. This keeps
+# http:// URLs usable without making port 3443 accept insecure traffic.
+http://:8080 {
+	reverse_proxy app:3000
+}
+
 https://localhost:3443 {
+	reverse_proxy app:3000
+	tls internal
+}
+
+# Allow devices on the current local network to reach the same dashboard.
+# Caddy needs the LAN IP explicitly so the TLS handshake has a matching
+# certificate rather than failing before the browser can show its warning.
+https://192.168.1.5:3443 {
+	reverse_proxy app:3000
+	tls internal
+}
+
+# Support the loopback IP over HTTPS as well as the localhost hostname.
+https://127.0.0.1:3443 {
+	reverse_proxy app:3000
+	tls internal
+}
+
+# mDNS hostname for other devices on the same Wi-Fi. Unlike an IP address,
+# this supplies a normal TLS hostname in browsers that require SNI.
+https://pranjuls-MacBook-Pro.local:3443 {
 	reverse_proxy app:3000
 	tls internal
 }

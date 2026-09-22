@@ -50,7 +50,7 @@ services:
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:postgres@db:5432/supabase?search_path=auth
       GOTRUE_SITE_URL: https://localhost:3443
-      GOTRUE_URI_ALLOW_LIST: "http://localhost:3010/**,http://localhost:3000/**,https://localhost:3443/**"
+      GOTRUE_URI_ALLOW_LIST: "http://localhost:3000/**,https://localhost:3443/**"
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
@@ -136,6 +136,7 @@ services:
   studio:
     image: supabase/studio:20240422-5cf8f30
     container_name: mediahub-studio
+    profiles: ["tools"]
     restart: unless-stopped
     ports:
       - "54323:3000"
@@ -152,6 +153,7 @@ services:
   meta:
     image: supabase/postgres-meta:v0.80.0
     container_name: mediahub-meta
+    profiles: ["tools"]
     restart: unless-stopped
     environment:
       PG_META_PORT: 8080
@@ -169,6 +171,18 @@ services:
     image: redis:7-alpine
     container_name: mediahub-redis
     restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      # A guardrail only: queue code now removes completed background jobs.
+      # noeviction fails a bad producer explicitly instead of silently losing jobs.
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+      - --auto-aof-rewrite-min-size
+      - 16mb
     ports:
       - "6379:6379"
     volumes:
@@ -183,6 +197,7 @@ services:
   email:
     image: inbucket/inbucket:latest
     container_name: mediahub-email
+    profiles: ["tools"]
     restart: unless-stopped
     ports:
       - "54324:9000"
@@ -222,8 +237,6 @@ services:
       target: app
     container_name: mediahub-app
     restart: unless-stopped
-    ports:
-      - "3010:3000"
     environment:
       # NEXT_PUBLIC_ vars are baked in at build time (see Dockerfile).
       # These runtime vars are for server-side code only.
@@ -233,10 +246,16 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+      # The dashboard is interactive; it must not start account-wide polling
+      # or scraping while idle. Enable only for an intentionally scheduled run.
+      ENABLE_AUTOMATIC_BACKGROUND_JOBS: "false"
       NEXT_PUBLIC_APP_URL: https://localhost:3443
       # Optional rotating proxy for Instagram scraping (from .env). Either name works.
       INSTA_PROXY: ${INSTA_PROXY:-}
       ECOURTS_PROXIES: ${ECOURTS_PROXIES:-}
+      # Concurrent Facebook comment pages (1-8). Unset picks a value from the
+      # host's CPU and memory; lower it if the machine runs hot.
+      FB_COMMENT_WORKERS: ${FB_COMMENT_WORKERS:-}
     depends_on:
       db:
         condition: service_healthy
@@ -252,12 +271,16 @@ services:
       dockerfile: Dockerfile
       target: worker
     container_name: mediahub-worker
+    # Manual background work only. It cannot start when the regular dashboard
+    # stack is started; use --profile background for an intentional worker run.
+    profiles: ["background"]
     restart: unless-stopped
     environment:
       SUPABASE_URL: http://kong:8000
       SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       REDIS_URL: redis://redis:6379
       TOKEN_ENCRYPTION_KEY: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+      ENABLE_AUTOMATIC_BACKGROUND_JOBS: "false"
       NEXT_PUBLIC_APP_URL: https://localhost:3443
       # Optional rotating proxy for Instagram scraping (from .env). Either name works.
       INSTA_PROXY: ${INSTA_PROXY:-}
@@ -277,6 +300,7 @@ services:
     restart: unless-stopped
     ports:
       - "3443:3443"
+      - "8080:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

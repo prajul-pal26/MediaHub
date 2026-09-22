@@ -4,7 +4,6 @@ import { TRPCError } from "@trpc/server";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { createHmac, randomBytes, createHash } from "crypto";
 import { getRedis } from "@/lib/redis";
-import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
 import { isGodUser } from "@/lib/god";
 
 const platformSchema = z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]);
@@ -590,13 +589,6 @@ export const socialAccountsRouter = router({
 
           connected.push(existing.id);
 
-          // Queue jobs for reconnected account
-          try {
-            const queue = getHistoricalImportQueue();
-            await queue.add(`historical-${platform}-${data.brandId}`, {
-              accountId: existing.id, brandId: data.brandId, orgId: data.orgId, platform,
-            });
-          } catch {}
         } else {
           const { data: newAccount } = await db.from("social_accounts").insert({
             brand_id: data.brandId,
@@ -611,26 +603,8 @@ export const socialAccountsRouter = router({
             is_active: true,
           }).select("id").single();
 
-          if (newAccount) {
-            connected.push(newAccount.id);
-
-            // Queue jobs for new account
-            try {
-              const queue = getHistoricalImportQueue();
-              await queue.add(`historical-${platform}-${data.brandId}`, {
-                accountId: newAccount.id, brandId: data.brandId, orgId: data.orgId, platform,
-              });
-            } catch {}
-          }
+          if (newAccount) connected.push(newAccount.id);
         }
-
-        // Queue comment sync
-        try {
-          const commentSyncQueue = getCommentSyncQueue();
-          await commentSyncQueue.add(`comment-sync-${platform}-${data.brandId}`, {
-            brandId: data.brandId,
-          });
-        } catch {}
       }
 
       // Clean up Redis

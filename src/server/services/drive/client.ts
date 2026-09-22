@@ -66,7 +66,8 @@ function createOAuth2Client(clientId: string, clientSecret: string, redirectUri:
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-async function getAuthenticatedDrive(brandId: string, orgId: string): Promise<drive_v3.Drive> {
+/** Callers must verify both organization membership and access to this brand. */
+export async function getAuthenticatedDrive(brandId: string, orgId: string): Promise<drive_v3.Drive> {
   const db = getDb();
   const { data: conn, error } = await db
     .from("drive_connections")

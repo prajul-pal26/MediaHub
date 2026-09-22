@@ -14,6 +14,7 @@
 
 set -e
 cd "$(dirname "$0")"
+source "./scripts/docker-build-preflight.sh"
 
 echo ""
 echo "=========================================="
@@ -82,6 +83,7 @@ echo ""
 # Build app + worker in one pass. BuildKit builds the shared `deps` stage
 # once and reuses cached layers, so unchanged code rebuilds nothing.
 # Infra (db, redis, kong, …) stays up throughout — no mid-build teardown.
+ensure_docker_build_space
 DOCKER_BUILDKIT=1 docker compose build app worker 2>&1
 
 # Start / update all services (only changed containers are recreated).

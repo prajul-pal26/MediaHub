@@ -14,6 +14,7 @@
 
 set -e
 cd "$(dirname "$0")"
+source "./scripts/docker-build-preflight.sh"
 
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.dev.yml"
 
@@ -31,6 +32,7 @@ fi
 # Build the dev image only when asked, or when it doesn't exist yet.
 if [ "$1" = "--build" ]; then
   echo "[build] Rebuilding dev image (dependencies changed)..."
+  ensure_docker_build_space
   DOCKER_BUILDKIT=1 $COMPOSE build app worker
 fi
 

@@ -1,17 +1,24 @@
 import { z } from "zod";
+import { availableParallelism } from "node:os";
 import { router, protectedProcedure, publicProcedure } from "../index";
 import { encrypt, decrypt } from "@/lib/encryption";
 import {
   fetchInstagramProfile,
+  fetchInstagramProfileFromSearch,
   fetchUserFriends,
   fetchUserFeed,
   fetchHashtagMedia,
   loginInstagram,
+  extractInstagramUsername,
+  shortcodeToMediaId,
   InstaAuthError,
+  InstaRateLimitError,
   type InstaProfile,
   type InstaFriend,
   type InstaMediaItem,
 } from "@/server/services/instagram/fetcher";
+import { fetchBrowserProfileFeed } from "@/server/services/instagram/browser-discovery";
+import { fetchMediaComments } from "@/server/services/instagram/comments";
 
 export interface AudienceQuality {
   sampled: number;
@@ -21,6 +28,19 @@ export interface AudienceQuality {
   /** 0–100, higher = healthier / more-real audience */
   qualityScore: number;
   flags: string[];
+}
+
+export interface InstaFetchStats {
+  totalPosts: number;
+  scrapedPosts: number;
+  totalFollowers: number;
+  scrapedFollowers: number;
+  totalFollowing: number;
+  scrapedFollowing: number;
+  totalCommentsScraped: number;
+  totalLikesScraped: number;
+  totalViewsScraped: number;
+  calculatedEngagementRate: number | null;
 }
 
 export interface InstaFetchResult {
@@ -35,7 +55,89 @@ export interface InstaFetchResult {
   content?: InstaMediaItem[];
   contentTruncated?: boolean;
   contentError?: string;
+  /** Number of latest post/reel links checkpointed in the local workspace. */
+  linksSaved?: number;
+  stats?: InstaFetchStats;
   error?: string;
+  /** Comments are queued after durable link discovery, never fetched inside
+   * this request where a large profile would time out. */
+  commentsDeferred?: boolean;
+}
+
+/** Keep content discovery durable. Comment harvesting is intentionally handled
+ * by the separate insta-comments worker after these links have been saved. */
+async function persistDiscoveredMedia(
+  db: any,
+  orgId: string,
+  username: string,
+  content: InstaMediaItem[] | undefined,
+) {
+  const rows = (content ?? [])
+    .filter((post) => post.id)
+    .map((post) => ({
+      org_id: orgId,
+      target_username: username,
+      media_id: post.id,
+      shortcode: post.shortcode || null,
+      media_url: post.url || null,
+      media_kind: post.kind || null,
+      likes_count: Number.isFinite(post.likes) ? post.likes : null,
+      comments_count_reported: Number.isFinite(post.comments) ? post.comments : null,
+    }));
+  if (!rows.length) return 0;
+  const { error } = await db
+    .from("insta_comment_media")
+    .upsert(rows, { onConflict: "org_id,target_username,media_id" });
+  if (error) throw new Error(`Could not save Instagram media links: ${error.message}`);
+  return rows.length;
+}
+
+function computeStats(
+  profile?: InstaProfile,
+  followers?: InstaFriend[],
+  following?: InstaFriend[],
+  content?: InstaMediaItem[],
+): InstaFetchStats {
+  const totalPosts = profile?.postsCount ?? 0;
+  const posts = content ?? (profile?.recentPosts as InstaMediaItem[] | undefined) ?? [];
+  const scrapedPosts = posts.length;
+  const totalFollowers = profile?.followers ?? 0;
+  const scrapedFollowers = followers?.length ?? 0;
+  const totalFollowing = profile?.following ?? 0;
+  const scrapedFollowing = following?.length ?? 0;
+
+  let totalCommentsScraped = 0;
+  let totalLikesScraped = 0;
+  let totalViewsScraped = 0;
+
+  for (const p of posts) {
+    totalLikesScraped += p.likes || 0;
+    totalViewsScraped += p.views || 0;
+    if (Array.isArray(p.commentsData)) {
+      totalCommentsScraped += p.commentsData.length;
+    } else {
+      totalCommentsScraped += p.comments || 0;
+    }
+  }
+
+  let calculatedEngagementRate = profile?.engagementRate ?? null;
+  if (totalFollowers > 0 && scrapedPosts > 0) {
+    const totalEng = posts.reduce((sum, p) => sum + (p.likes || 0) + (p.comments || 0), 0);
+    calculatedEngagementRate = Math.round((totalEng / scrapedPosts / totalFollowers) * 10000) / 100;
+  }
+
+  return {
+    totalPosts,
+    scrapedPosts,
+    totalFollowers,
+    scrapedFollowers,
+    totalFollowing,
+    scrapedFollowing,
+    totalCommentsScraped,
+    totalLikesScraped,
+    totalViewsScraped,
+    calculatedEngagementRate,
+  };
 }
 
 /**
@@ -218,6 +320,10 @@ async function resolveAnyActiveSession(db: any): Promise<string | null> {
 // Crude global rate limit for the unauthenticated public demo (protects the
 // shared session from abuse). Resets per server instance.
 const demoHits: number[] = [];
+function configuredCommentConcurrency(fallback: number): number {
+  const value = Number(process.env.SOCIAL_COMMENT_CONCURRENCY ?? Math.min(availableParallelism(), 12));
+  return Number.isFinite(value) ? Math.max(1, Math.min(Math.floor(value), 12)) : fallback;
+}
 function allowDemo(): boolean {
   const now = Date.now();
   while (demoHits.length && demoHits[0] < now - 60_000) demoHits.shift();
@@ -237,20 +343,24 @@ export const instaFetcherRouter = router({
       z.object({
         usernames: z.array(z.string().min(1)).min(1).max(3),
         includeFriends: z.boolean().default(false),
+        friendsLimit: z.number().min(1).max(500).default(60),
         includeContent: z.boolean().default(false),
+        contentLimit: z.number().min(1).max(50).default(12),
+        includeComments: z.boolean().default(false),
+        commentsLimit: z.number().min(1).max(100).default(25),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       if (!allowDemo()) {
         throw new Error("The live demo is busy right now — please try again in a minute.");
       }
-      const wantsSession = input.includeFriends || input.includeContent;
-      const sessionId = wantsSession ? await resolveAnyActiveSession(ctx.db) : undefined;
+      const wantsSession = input.includeFriends || input.includeContent || input.includeComments;
+      const sessionId = wantsSession ? (await resolveAnyActiveSession(ctx.db) ?? undefined) : undefined;
 
       const seen = new Set<string>();
       const targets = input.usernames
-        .map((u) => u.trim().replace(/^@/, "").toLowerCase())
-        .filter((u) => u && !seen.has(u) && (seen.add(u), true));
+        .map((u) => extractInstagramUsername(u))
+        .filter((u): u is string => Boolean(u) && !seen.has(u) && (seen.add(u), true));
 
       const results: InstaFetchResult[] = [];
       for (let i = 0; i < targets.length; i++) {
@@ -262,15 +372,16 @@ export const instaFetcherRouter = router({
             await Promise.all([
               input.includeFriends
                 ? Promise.all([
-                    fetchUserFriends(profile.id, "followers", sessionId, 60)
+                    fetchUserFriends(profile.id, "followers", sessionId, input.friendsLimit || 60)
                       .then((f) => {
                         entry.followers = f.users;
                         entry.friendsTruncated = f.truncated;
+                        entry.followersQuality = analyzeAudience(f.users);
                       })
                       .catch((e) => {
                         entry.friendsError = profile.isPrivate ? "Private account." : e?.message;
                       }),
-                    fetchUserFriends(profile.id, "following", sessionId, 60)
+                    fetchUserFriends(profile.id, "following", sessionId, input.friendsLimit || 60)
                       .then((f) => {
                         entry.following = f.users;
                       })
@@ -278,7 +389,7 @@ export const instaFetcherRouter = router({
                   ])
                 : Promise.resolve(),
               input.includeContent
-                ? fetchUserFeed(profile.id, sessionId, 12)
+                ? fetchUserFeed(profile.id, sessionId, input.contentLimit || 12)
                     .then((c) => {
                       entry.content = c.items;
                       entry.contentTruncated = c.truncated;
@@ -288,11 +399,46 @@ export const instaFetcherRouter = router({
                     })
                 : Promise.resolve(),
             ]);
+
+            // Harvest comments if requested
+            if (input.includeComments && sessionId) {
+              const postsToHarvest = entry.content?.length
+                ? entry.content
+                : (entry.profile?.recentPosts as InstaMediaItem[] | undefined) || [];
+              const commentLimit = input.commentsLimit || 25;
+              const batchSize = Math.min(configuredCommentConcurrency(8), 3);
+              for (let bi = 0; bi < postsToHarvest.length; bi += batchSize) {
+                const batch = postsToHarvest.slice(bi, bi + batchSize);
+                await Promise.all(
+                  batch.map(async (post) => {
+                    try {
+                      const mediaId = post.id || (post.shortcode ? shortcodeToMediaId(post.shortcode) : "");
+                      if (!mediaId) return;
+                      const commentRes = await fetchMediaComments(mediaId, sessionId, {
+                        max: commentLimit,
+                        includeReplies: true,
+                        delayMs: 250,
+                      });
+                      post.commentsData = commentRes.comments;
+                    } catch (ce: any) {
+                      post.commentsError = ce?.message ?? "Comments fetch failed";
+                    }
+                  }),
+                );
+              }
+            }
           } else if (wantsSession) {
             const m = "Deep data is available in the full studio — sign in to unlock.";
             if (input.includeFriends) entry.friendsError = m;
             if (input.includeContent) entry.contentError = m;
+            if (input.includeComments) {
+              for (const p of entry.content || entry.profile?.recentPosts || []) {
+                (p as InstaMediaItem).commentsError = m;
+              }
+            }
           }
+
+          entry.stats = computeStats(entry.profile, entry.followers, entry.following, entry.content);
           results.push(entry);
         } catch (err: any) {
           results.push({ username, ok: false, error: err?.message ?? "Fetch failed" });
@@ -367,11 +513,16 @@ export const instaFetcherRouter = router({
     .input(z.object({ sessionId: z.string().min(1), label: z.string().optional() }))
     .mutation(async ({ ctx, input }) => {
       const raw = input.sessionId.trim();
+      // Accept either the bare sessionid or a complete Cookie header. A complete
+      // browser cookie header is preferred because it retains the csrftoken and
+      // companion account cookies that Instagram expects on authenticated web
+      // requests. Locate sessionid anywhere in that header before validating it.
+      const savedSession = /(?:^|;\s*)sessionid=([^;]+)/i.exec(raw)?.[1] ?? raw;
       // A real Instagram sessionid starts with the numeric user id + a colon
       // (often URL-encoded as %3A), e.g. "52099132579:AbCd...". A 32-char value
       // with no colon is almost certainly the csrftoken pasted by mistake.
       const looksLikeSessionId =
-        /^\d{5,}(:|%3A)/i.test(raw) || /sessionid=\d{5,}(:|%3A)/i.test(raw);
+        /^\d{5,}(:|%3A)/i.test(savedSession);
       if (!looksLikeSessionId) {
         throw new Error(
           "That doesn't look like a sessionid. It should start with your numeric ID and contain colons (e.g. 52099132579:AbCd...). You may have copied the 'csrftoken' cookie by mistake — copy the 'sessionid' cookie value instead.",
@@ -435,7 +586,9 @@ export const instaFetcherRouter = router({
         includeFriends: z.boolean().default(false),
         friendsLimit: z.number().min(1).max(5000).default(200),
         includeContent: z.boolean().default(false),
-        contentLimit: z.number().min(1).max(200).default(24),
+        contentLimit: z.number().min(1).max(1000).default(24),
+        includeComments: z.boolean().default(false),
+        commentsLimit: z.number().min(1).max(500).default(25),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -445,7 +598,7 @@ export const instaFetcherRouter = router({
 
       const seen = new Set<string>();
       const targets = input.usernames
-        .map((u) => u.trim().replace(/^@/, "").toLowerCase())
+        .map((u) => extractInstagramUsername(u))
         .filter((u) => u && !seen.has(u) && (seen.add(u), true));
 
       const results: InstaFetchResult[] = [];
@@ -453,20 +606,37 @@ export const instaFetcherRouter = router({
       for (let i = 0; i < targets.length; i++) {
         const username = targets[i];
         try {
-          // Public profile works without a session; use one when we have it (self-heals).
+          // `web_profile_info` is an old private endpoint and can be rejected
+          // while Instagram's own current browser lookup still works. Resolve
+          // through browser-compatible search in that specific case, then use
+          // the browser's Profile Posts GraphQL response for link discovery.
+          let browserDiscovery = false;
           const profile = pool.hasAny
             ? await pool
                 .run((sid) => fetchInstagramProfile(username, sid))
-                .catch(() => fetchInstagramProfile(username))
+                .catch(async (error) => {
+                  if (error instanceof InstaRateLimitError) {
+                    browserDiscovery = true;
+                    return pool.run((sid) => fetchInstagramProfileFromSearch(username, sid));
+                  }
+                  return fetchInstagramProfile(username);
+                })
             : await fetchInstagramProfile(username);
           const entry: InstaFetchResult = { username, ok: true, profile };
 
-          const wantsDeep = (input.includeFriends || input.includeContent) && Boolean(profile.id);
+          const wantsDeep =
+            (input.includeFriends || input.includeContent || input.includeComments) &&
+            Boolean(profile.id);
 
           if (wantsDeep && !pool.hasAny) {
             const m = "No active session — add one in Settings → Instagram.";
             if (input.includeFriends) entry.friendsError = m;
             if (input.includeContent) entry.contentError = m;
+            if (input.includeComments) {
+              for (const p of entry.content || entry.profile?.recentPosts || []) {
+                (p as InstaMediaItem).commentsError = m;
+              }
+            }
           } else if (wantsDeep) {
             const friendErr = (fe: any): string => {
               if (fe instanceof InstaAuthError)
@@ -501,10 +671,23 @@ export const instaFetcherRouter = router({
                   }),
               );
             }
-            if (input.includeContent) {
+            // A comment request always needs the durable post/reel links first.
+            // Fetch that compact media grid here, then hand comments to BullMQ.
+            if (input.includeContent || input.includeComments) {
               jobs.push(
                 pool
-                  .run((sid) => fetchUserFeed(profile.id, sid, input.contentLimit))
+                  .run(async (sid) => {
+                    if (browserDiscovery) {
+                      return fetchBrowserProfileFeed(profile.username, sid, input.contentLimit);
+                    }
+                    const apiResult = await fetchUserFeed(profile.id, sid, input.contentLimit);
+                    // Instagram sometimes answers the legacy feed endpoint with
+                    // an empty 200 response. The browser response is the
+                    // reliable fallback, not a retry loop against that route.
+                    return apiResult.items.length
+                      ? apiResult
+                      : fetchBrowserProfileFeed(profile.username, sid, input.contentLimit);
+                  })
                   .then((c) => {
                     entry.content = c.items;
                     entry.contentTruncated = c.truncated;
@@ -515,8 +698,27 @@ export const instaFetcherRouter = router({
               );
             }
             await Promise.all(jobs);
+
+            // Persist all post/reel links and visible metrics before any
+            // optional comment action. This is the durable handoff to the
+            // dedicated Instagram comment pipeline.
+            if (entry.content?.length) {
+              try {
+                entry.linksSaved = await persistDiscoveredMedia(
+                  ctx.db,
+                  ctx.profile!.org_id,
+                  profile.username,
+                  entry.content,
+                );
+              } catch (persistError: any) {
+                entry.contentError = entry.contentError ?? persistError?.message ?? "Could not save discovered media";
+              }
+            }
+
+            if (input.includeComments && entry.content?.length) entry.commentsDeferred = true;
           }
 
+          entry.stats = computeStats(entry.profile, entry.followers, entry.following, entry.content);
           results.push(entry);
         } catch (err: any) {
           results.push({ username, ok: false, error: err?.message ?? "Fetch failed" });

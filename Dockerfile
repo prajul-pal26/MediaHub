@@ -48,9 +48,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # Chromium for the Playwright-based Facebook page scraper (session rendering).
 RUN apk add --no-cache \
-    chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+    chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    CHROMIUM_PATH=/usr/bin/chromium-browser
+    CHROMIUM_PATH=/usr/bin/chromium \
+    FB_HEADFUL=1
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
@@ -68,10 +69,16 @@ ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 CMD ["node", "server.js"]
 
-# ─── Worker (doesn't need Next.js build, just tsx + node_modules) ───
+# ─── Worker ───
+# Facebook jobs may be dispatched from worker-owned flows. Keep its browser
+# runtime aligned with the app image so those jobs never fail at launch time.
 FROM node:20-alpine AS worker
-RUN apk add --no-cache libc6-compat ffmpeg
+RUN apk add --no-cache \
+    libc6-compat ffmpeg chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 WORKDIR /app
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    CHROMIUM_PATH=/usr/bin/chromium \
+    FB_HEADFUL=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 CMD ["npx", "tsx", "worker.ts"]
@@ -84,11 +91,12 @@ FROM base AS dev
 ENV NODE_ENV=development
 # ffmpeg (worker) + chromium (Facebook scraper) so the same image runs both.
 RUN apk add --no-cache \
-    ffmpeg chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+    ffmpeg chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    CHROMIUM_PATH=/usr/bin/chromium-browser \
+    CHROMIUM_PATH=/usr/bin/chromium \
     NEXT_TELEMETRY_DISABLED=1 \
-    WATCHPACK_POLLING=true
+    WATCHPACK_POLLING=true \
+    FB_HEADFUL=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 EXPOSE 3000

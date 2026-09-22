@@ -12,6 +12,8 @@
  * Use a throwaway account's session id — never a personal one.
  */
 
+import type { InstaComment } from "./comments";
+
 const IG_APP_ID = "936619743392459";
 const MOBILE_UA =
   "Instagram 12.0.0.16.90 (iPhone9,4; iOS 10_3_3; en_US; en-US; scale=2.61; gamut=wide; 1080x1920) AppleWebKit/420+";
@@ -21,6 +23,50 @@ const PROFILE_ENDPOINT =
   "https://www.instagram.com/api/v1/users/web_profile_info/?username=";
 const LOGIN_PAGE = "https://www.instagram.com/accounts/login/";
 const LOGIN_ENDPOINT = "https://www.instagram.com/accounts/login/ajax/";
+
+const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/**
+ * Convert an Instagram shortcode (e.g. 'DcC-6etJ6zD') to a numeric media ID in 0ms (pure local BigInt decode).
+ */
+export function shortcodeToMediaId(shortcode: string): string {
+  let value = 0n;
+  for (const ch of shortcode) {
+    const idx = SHORTCODE_ALPHABET.indexOf(ch);
+    if (idx < 0) continue;
+    value = value * 64n + BigInt(idx);
+  }
+  return value.toString();
+}
+
+/**
+ * Extract clean Instagram username from any input:
+ * - https://www.instagram.com/dr_arun_kumar_saxena
+ * - https://instagram.com/dr_arun_kumar_saxena/?igsh=...
+ * - @dr_arun_kumar_saxena
+ * - dr_arun_kumar_saxena
+ */
+export function extractInstagramUsername(input: string): string {
+  if (!input) return "";
+  const s = input.trim();
+  const match = s.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)/i);
+  if (match && match[1]) {
+    const part = match[1].toLowerCase();
+    if (!["p", "reel", "reels", "stories", "explore", "tv", "direct"].includes(part)) {
+      return part;
+    }
+  }
+  return s
+    .replace(/^[#@]+/, "")
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/+$/, "")
+    .split("/")
+    .pop()
+    ?.toLowerCase()
+    .replace(/^[#@]+/, "")
+    .trim() || "";
+}
 
 export interface InstaLoginResult {
   ok: boolean;
@@ -230,7 +276,15 @@ export class InstaRateLimitError extends Error {}
  * bot signal that gets the session killed quickly.
  */
 export function normalizeSession(raw: string): { cookie: string; csrftoken: string | null } {
-  const s = raw.trim();
+  // DevTools' "Copy value" can include the literal `Cookie:` header name.
+  // Store/import either shape, but never send `Cookie:` as part of the header
+  // value or as a Playwright cookie name.
+  const s = raw
+    .trim()
+    .replace(/^cookie\s*:\s*/i, "")
+    // Chrome's copied request-header label can be separated from the first
+    // cookie with whitespace rather than a colon ("cookie datr=...").
+    .replace(/^cookie\s+/i, "");
   const looksLikeCookieString = /(^|;\s*)[a-zA-Z_]+=/.test(s) && s.includes("=");
 
   if (looksLikeCookieString) {
@@ -511,6 +565,23 @@ export interface InstaCarouselChild {
   isVideo: boolean;
 }
 
+/**
+ * Geotag attached to a post/reel. Instagram sources these from Facebook Places,
+ * so `name` ranges from a precise venue to a whole country ("India"). Only a
+ * minority of posts carry one — roughly a quarter in sampling — because tagging
+ * a location is optional for the poster.
+ */
+export interface InstaLocation {
+  id: string | null;
+  name: string;
+  shortName: string | null;
+  address: string | null;
+  city: string | null;
+  lat: number | null;
+  lng: number | null;
+  facebookPlacesId: string | null;
+}
+
 export interface InstaMediaItem {
   id: string;
   shortcode: string;
@@ -526,6 +597,12 @@ export interface InstaMediaItem {
   carousel: InstaCarouselChild[];
   /** Posting account, when the payload carries it (hashtag search does). */
   ownerUsername?: string | null;
+  /** Geotag, when the poster attached one. Null far more often than not. */
+  location?: InstaLocation | null;
+  /** Fetched comments list when includeComments is requested */
+  commentsData?: InstaComment[];
+  /** Error message if comment harvesting failed for this post */
+  commentsError?: string;
 }
 
 export interface InstaFeedResult {
@@ -537,6 +614,24 @@ function bestImage(node: any): string | null {
   const c = node?.image_versions2?.candidates;
   return Array.isArray(c) && c.length ? c[0].url : null;
 }
+/** Normalize Instagram's raw location blob; returns null when untagged. */
+function mapLocation(raw: any): InstaLocation | null {
+  if (!raw || typeof raw !== "object") return null;
+  const name = raw.name ?? "";
+  if (!name) return null;
+  const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    id: raw.pk != null ? String(raw.pk) : null,
+    name,
+    shortName: raw.short_name ?? null,
+    address: raw.address || null,
+    city: raw.city || null,
+    lat: numOrNull(raw.lat),
+    lng: numOrNull(raw.lng),
+    facebookPlacesId: raw.facebook_places_id != null ? String(raw.facebook_places_id) : null,
+  };
+}
+
 function bestVideo(node: any): string | null {
   const v = node?.video_versions;
   return Array.isArray(v) && v.length ? v[0].url : null;
@@ -554,12 +649,13 @@ export async function fetchUserFeed(
   if (!sessionRaw) throw new InstaAuthError("A valid session is required to read the content feed");
   const session = normalizeSession(sessionRaw);
   const headers = igApiHeaders(session);
-  const cap = Math.min(Math.max(maxCount, 1), 200);
+  const cap = Math.min(Math.max(maxCount, 1), 1000);
   const items: InstaMediaItem[] = [];
   let maxId: string | null = null;
   let truncated = false;
 
-  for (let page = 0; page < 20; page++) {
+  const maxPages = Math.min(Math.ceil(cap / 24) + 1, 60);
+  for (let page = 0; page < maxPages; page++) {
     const url =
       `https://www.instagram.com/api/v1/feed/user/${encodeURIComponent(userId)}/` +
       `?count=24${maxId ? `&max_id=${encodeURIComponent(maxId)}` : ""}`;
@@ -732,6 +828,7 @@ export async function fetchHashtagMedia(
       takenAt: typeof it?.taken_at === "number" ? it.taken_at : null,
       carousel,
       ownerUsername: it?.user?.username ?? it?.owner?.username ?? null,
+      location: mapLocation(it?.location),
     });
     if (items.length >= maxCount) break;
   }
@@ -744,11 +841,82 @@ export async function fetchHashtagMedia(
   };
 }
 
+async function fetchProfileFromHtml(username: string): Promise<InstaProfile | null> {
+  try {
+    const res = await fetch(`https://www.instagram.com/${encodeURIComponent(username)}/`, {
+      headers: {
+        "User-Agent": DESKTOP_UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    let followers = 0;
+    let following = 0;
+    let postsCount = 0;
+    const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+    if (ogDescMatch) {
+      const desc = ogDescMatch[1];
+      const fMatch = desc.match(/([0-9.,KMBkmb]+)\s+Followers/i);
+      const foMatch = desc.match(/([0-9.,KMBkmb]+)\s+Following/i);
+      const pMatch = desc.match(/([0-9.,KMBkmb]+)\s+Posts/i);
+      const parseCount = (s?: string) => {
+        if (!s) return 0;
+        const cleaned = s.replace(/,/g, "").trim().toUpperCase();
+        if (cleaned.endsWith("M")) return Math.round(parseFloat(cleaned) * 1_000_000);
+        if (cleaned.endsWith("K")) return Math.round(parseFloat(cleaned) * 1_000);
+        if (cleaned.endsWith("B")) return Math.round(parseFloat(cleaned) * 1_000_000_000);
+        return parseInt(cleaned, 10) || 0;
+      };
+      if (fMatch) followers = parseCount(fMatch[1]);
+      if (foMatch) following = parseCount(foMatch[1]);
+      if (pMatch) postsCount = parseCount(pMatch[1]);
+    }
+
+    const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+    let fullName = "";
+    if (ogTitleMatch) {
+      const parts = ogTitleMatch[1].split("(@");
+      if (parts[0]) fullName = parts[0].replace(/•.*/, "").trim();
+    }
+
+    const ogImageMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    const profilePic = ogImageMatch ? ogImageMatch[1].replace(/&amp;/g, "&") : null;
+
+    if (followers > 0 || postsCount > 0 || profilePic) {
+      return {
+        id: "",
+        username,
+        fullName: fullName || username,
+        bio: "",
+        profilePic,
+        externalUrl: null,
+        isPrivate: false,
+        isVerified: false,
+        isBusiness: false,
+        category: null,
+        followers,
+        following,
+        postsCount,
+        engagementRate: null,
+        recentPosts: [],
+      };
+    }
+  } catch {}
+  return null;
+}
+
 export async function fetchInstagramProfile(
   usernameRaw: string,
   sessionId?: string,
 ): Promise<InstaProfile> {
-  const username = usernameRaw.trim().replace(/^@/, "").toLowerCase();
+  const username = extractInstagramUsername(usernameRaw);
   if (!username || !/^[a-zA-Z0-9._]{1,30}$/.test(username)) {
     throw new Error(`Invalid Instagram username: "${usernameRaw}"`);
   }
@@ -790,7 +958,7 @@ export async function fetchInstagramProfile(
   };
 
   const hasAuth = Boolean(headers["Cookie"]);
-  let res: Response;
+  let res: Response | null = null;
   try {
     res = await doFetch(hasAuth);
     // A bad/expired session must not block public profile data — retry anonymously.
@@ -798,6 +966,8 @@ export async function fetchInstagramProfile(
       res = await doFetch(false);
     }
   } catch (err: any) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
     throw new Error(
       err?.name === "AbortError"
         ? "Instagram request timed out"
@@ -805,22 +975,37 @@ export async function fetchInstagramProfile(
     );
   }
 
-  if (res.status === 404) throw new Error(`User "@${username}" not found`);
-  if (res.status === 429)
-    throw new Error("Rate limited by Instagram — wait a few minutes and try again");
-  if (res.status === 401 || res.status === 403)
-    throw new Error("Instagram rate-limited this lookup — wait a few minutes and try again");
-  if (!res.ok) throw new Error(`Instagram returned HTTP ${res.status}`);
+  if (res && res.status === 404) throw new Error(`User "@${username}" not found`);
+  // Do not disguise an Instagram throttle as a successful public-profile
+  // fallback. A fallback has no internal user ID, so it cannot discover media
+  // links or start the durable comment job. Callers need the real condition.
+  if (res?.status === 429) {
+    throw new InstaRateLimitError("Instagram is rate limiting this session — wait a while before retrying");
+  }
+
+  if (!res || !res.ok) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
+    if (res?.status === 401 || res?.status === 403)
+      throw new Error("Instagram rate-limited this lookup — wait a few minutes and try again");
+    throw new Error(`Instagram returned HTTP ${res?.status ?? "unknown"}`);
+  }
 
   let json: any;
   try {
     json = await res.json();
   } catch {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
     throw new Error("Instagram returned a non-JSON response (likely a login wall)");
   }
 
   const user = json?.data?.user;
-  if (!user) throw new Error(`No profile data returned for "@${username}"`);
+  if (!user) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
+    throw new Error(`No profile data returned for "@${username}"`);
+  }
 
   const recentPosts = parsePosts(user);
   const followers = num(user?.edge_followed_by?.count);
@@ -849,5 +1034,64 @@ export async function fetchInstagramProfile(
     postsCount: num(user?.edge_owner_to_timeline_media?.count),
     engagementRate,
     recentPosts,
+  };
+}
+
+/**
+ * Small authenticated lookup used when Instagram rejects the older
+ * web_profile_info endpoint. The browser still uses this search route to
+ * resolve an exact username before requesting its Profile Posts GraphQL data.
+ * It deliberately returns only fields that this response actually exposes;
+ * follower/post totals remain unknown rather than being invented as zero.
+ */
+export async function fetchInstagramProfileFromSearch(
+  usernameRaw: string,
+  sessionRaw: string,
+): Promise<InstaProfile> {
+  const username = extractInstagramUsername(usernameRaw);
+  if (!username || !/^[a-zA-Z0-9._]{1,30}$/.test(username)) {
+    throw new Error(`Invalid Instagram username: "${usernameRaw}"`);
+  }
+  if (!sessionRaw) throw new InstaAuthError("A valid session is required to resolve this profile");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://www.instagram.com/web/search/topsearch/?context=blended&query=${encodeURIComponent(username)}`,
+      { headers: igApiHeaders(normalizeSession(sessionRaw)), signal: controller.signal, cache: "no-store" },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new InstaAuthError("Instagram rejected the saved session");
+  }
+  if (response.status === 429) throw new InstaRateLimitError("Instagram is temporarily limiting profile lookup");
+  const payload: any = await response.json().catch(() => null);
+  const candidate = Array.isArray(payload?.users)
+    ? payload.users.find((entry: any) => String(entry?.user?.username ?? "").toLowerCase() === username)?.user
+    : null;
+  if (!response.ok || !candidate) throw new Error(`Instagram could not resolve "@${username}"`);
+
+  return {
+    id: String(candidate?.pk ?? candidate?.id ?? ""),
+    username: candidate?.username ?? username,
+    fullName: candidate?.full_name ?? username,
+    bio: "",
+    profilePic: candidate?.profile_pic_url ?? null,
+    externalUrl: null,
+    isPrivate: Boolean(candidate?.is_private),
+    isVerified: Boolean(candidate?.is_verified),
+    isBusiness: false,
+    category: null,
+    // This response does not expose these totals. Keep the existing type
+    // stable, but leave their display as unavailable at the caller layer.
+    followers: 0,
+    following: 0,
+    postsCount: 0,
+    engagementRate: null,
+    recentPosts: [],
   };
 }

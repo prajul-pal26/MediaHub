@@ -23,6 +23,8 @@ import {
   MessagesSquare,
   Clock,
   Search,
+  UserRoundPlus,
+  Newspaper,
 } from "lucide-react";
 
 interface NavItem {
@@ -44,8 +46,10 @@ const navItems: NavItem[] = [
   { label: "Threads", href: "/threads", icon: MessagesSquare, mode: "click" },
   { label: "Queue", href: "/queue", icon: ListTodo, mode: "click" },
   { label: "Accounts", href: "/accounts", icon: Link2, mode: "click" },
-  { label: "Instagram", href: "/instagram", icon: Search, mode: "click" },
-  { label: "Facebook", href: "/fb-scraper", icon: Users, mode: "click" },
+  { label: "Instagram Scrapper", href: "/instagram", icon: Search, mode: "click" },
+  { label: "Insta ID Creator", href: "/insta-id-creator", icon: UserRoundPlus, mode: "click" },
+  { label: "News Review", href: "/editorial-review", icon: Newspaper, mode: "click" },
+  { label: "Facebook Scrapper", href: "/facebook", icon: Users, mode: "click" },
   {
     label: "Brands",
     href: "/brands",
