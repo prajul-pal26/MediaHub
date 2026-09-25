@@ -19,13 +19,6 @@ import { canManageBrands } from "@/lib/types";
 import { isGodUser } from "@/lib/god";
 import { ChannelPickerDialog } from "@/components/accounts/ChannelPickerDialog";
 
-type InstagramConnectionRosterRow = {
-  id: string;
-  district: string | null;
-  instaName: string;
-  status: "pending" | "done";
-};
-
 export default function AccountsPage() {
   const { profile, loading: profileLoading } = useUser();
   const { activeBrandId } = useBrand();
@@ -91,10 +84,6 @@ export default function AccountsPage() {
   );
 
   const { data: configuredPlatforms = [] } = trpc.socialAccounts.configuredPlatforms.useQuery();
-  const { data: instagramConnectionRoster = [], isLoading: instagramRosterLoading } =
-    trpc.instaProfileUsers.connectionRoster.useQuery(undefined, {
-      enabled: !!profile && isGodUser(profile),
-    });
 
   const connectDriveMutation = trpc.drive.connect.useMutation({
     onSuccess: (data) => { window.location.href = data.url; },
@@ -140,30 +129,6 @@ export default function AccountsPage() {
   const canManageAccounts = profile && ["super_admin", "agency_admin", "brand_owner"].includes(profile.role);
   const canConnectAccounts = profile?.role === "brand_owner" || isGodUser(profile);
   const canManageDrive = canManageAccounts;
-  const instagramAccounts = socialAccounts.filter((account: any) => account.platform === "instagram");
-  const instagramNameKey = (name: string | null | undefined) => (name ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "")
-    // Directory names have had both Apna and Apnaa variants. Treat the suffix as
-    // the same account prefix while still matching the district exactly.
-    .replace(/^apna+/, "apna")
-    // Instagram usernames sometimes contain an accidental repeated final
-    // character (for example, apna_hardoii). It still represents the same
-    // roster profile when every preceding character matches.
-    .replace(/(.)\1+$/, "$1");
-  const connectedInstagramKeys = new Set(
-    instagramAccounts
-      .filter((account: any) => account.is_active)
-      .map((account: any) => instagramNameKey(account.platform_username))
-  );
-  const rosterConnections = (instagramConnectionRoster as InstagramConnectionRosterRow[]).map((profileRow) => ({
-    ...profileRow,
-    connected: connectedInstagramKeys.has(instagramNameKey(profileRow.instaName)),
-  }));
-  const connectedRosterCount = rosterConnections.filter((profileRow) => profileRow.connected).length;
-  const nonRosterInstagramAccounts = instagramAccounts.filter((account: any) =>
-    !rosterConnections.some((profileRow) => instagramNameKey(profileRow.instaName) === instagramNameKey(account.platform_username))
-  );
 
   return (
     <div className="space-y-6">
@@ -233,99 +198,9 @@ export default function AccountsPage() {
         </CardContent>
       </Card>
 
-      {/* Instagram connection roster comes first because it is the primary account-connection workflow. */}
-      {configuredPlatforms.includes("instagram") && isGodUser(profile) && (
-        <Card className="border-violet-200/80 bg-gradient-to-br from-violet-50/80 via-background to-background">
-          <CardHeader className="pb-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <CardTitle className="text-lg">Instagram connection tracker</CardTitle>
-                <CardDescription className="mt-1">
-                  Connect each directory profile from the Instagram account currently signed into your browser.
-                </CardDescription>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex w-fit items-center rounded-full border border-violet-200 bg-white px-3 py-1 text-xs font-semibold text-violet-800">
-                  {connectedRosterCount} of {rosterConnections.length} directory profiles connected
-                </div>
-                {canConnectAccounts && activeBrandId && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-violet-200 bg-white text-violet-800 hover:bg-violet-100"
-                    onClick={() => connectOAuthMutation.mutate({ brandId: activeBrandId, platform: "instagram" })}
-                    disabled={connectOAuthMutation.isPending}
-                  >
-                    {connectOAuthMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Plus className="mr-1.5 h-3.5 w-3.5" />}
-                    Add another Instagram
-                  </Button>
-                )}
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {instagramRosterLoading ? (
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {Array.from({ length: 9 }).map((_, index) => (
-                  <div key={index} className="h-20 animate-pulse rounded-xl border bg-muted/40" />
-                ))}
-              </div>
-            ) : rosterConnections.length === 0 ? (
-              <div className="rounded-xl border border-dashed bg-background p-5 text-sm text-muted-foreground">
-                No imported Instagram profiles are available yet.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {rosterConnections.map((profileRow) => (
-                  <div
-                    key={profileRow.id}
-                    className={`flex items-center justify-between gap-3 rounded-xl border p-3 ${
-                      profileRow.connected
-                        ? "border-emerald-200 bg-emerald-50/80"
-                        : "border-rose-200 bg-rose-50/80"
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">@{profileRow.instaName}</p>
-                      <p className={`text-xs ${profileRow.connected ? "text-emerald-700" : "text-rose-700"}`}>
-                        {profileRow.connected ? "Connected" : "Not connected"}
-                        {profileRow.district ? ` · ${profileRow.district}` : ""}
-                      </p>
-                    </div>
-                    {profileRow.connected ? (
-                      <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" aria-label="Connected" />
-                    ) : canConnectAccounts && activeBrandId ? (
-                      <Button
-                        size="sm"
-                        className="shrink-0 bg-rose-600 text-white hover:bg-rose-700"
-                        onClick={() => connectOAuthMutation.mutate({ brandId: activeBrandId, platform: "instagram" })}
-                        disabled={connectOAuthMutation.isPending}
-                      >
-                        {connectOAuthMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Add this Instagram"}
-                      </Button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {nonRosterInstagramAccounts.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2 border-t pt-4 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">Other connected Instagram accounts:</span>
-                {nonRosterInstagramAccounts.map((account: any) => (
-                  <span key={account.id} className="rounded-full bg-emerald-100 px-2.5 py-1 font-medium text-emerald-800">
-                    @{account.platform_username || account.platform_user_id}
-                  </span>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Other social platforms remain below the Instagram roster. */}
+      {/* Social Accounts — Platform Tiles (only shows platforms configured by super admin) */}
       <div>
-        <h2 className="text-lg font-semibold mb-4">Other social accounts</h2>
+        <h2 className="text-lg font-semibold mb-4">Social Accounts</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {([
             {
@@ -398,7 +273,7 @@ export default function AccountsPage() {
                 <svg className="h-10 w-10" viewBox="0 0 24 24"><path d="M12.206.793c.99 0 4.347.276 5.93 3.821.529 1.193.403 3.219.299 4.847l-.003.06c-.012.18-.022.345-.03.51.075.045.203.09.401.09.3-.016.659-.12 1.033-.301.165-.088.344-.104.464-.104.182 0 .359.029.509.09.45.149.734.479.734.838.015.449-.39.839-1.213 1.168-.089.029-.209.075-.344.119-.45.135-1.139.36-1.333.81-.09.224-.061.524.12.868l.015.015c.06.136 1.526 3.475 4.791 4.014.255.044.435.27.42.509 0 .075-.015.149-.045.225-.24.569-1.273.988-3.146 1.271-.059.091-.12.375-.164.57-.029.179-.074.36-.134.553-.076.271-.27.405-.555.405h-.03c-.135 0-.313-.031-.538-.074-.36-.075-.765-.135-1.273-.135-.3 0-.599.015-.913.074-.6.104-1.123.464-1.723.884-.853.599-1.826 1.288-3.294 1.288-.06 0-.119-.015-.18-.015h-.149c-1.468 0-2.427-.675-3.279-1.288-.599-.42-1.107-.779-1.707-.884-.314-.045-.629-.074-.928-.074-.54 0-.958.089-1.272.149-.211.043-.391.074-.54.074-.374 0-.523-.224-.583-.42-.061-.192-.09-.389-.135-.567-.046-.181-.105-.494-.166-.57-1.918-.222-2.95-.642-3.189-1.226-.031-.063-.052-.15-.055-.225-.015-.243.165-.465.42-.509 3.264-.54 4.73-3.879 4.791-4.02l.016-.029c.18-.345.224-.645.119-.869-.195-.434-.884-.658-1.332-.809-.121-.029-.24-.074-.346-.119-1.107-.435-1.257-.93-1.197-1.273.09-.479.674-.793 1.168-.793.146 0 .27.029.383.074.42.194.789.3 1.104.3.234 0 .384-.06.465-.105l-.046-.569c-.098-1.626-.225-3.651.307-4.837C7.392 1.077 10.739.807 11.727.807l.419-.015h.06" fill="#FFFC00" stroke="#000000" strokeWidth="0.5"/></svg>
               ),
             },
-          ] as const).filter((p) => p.key !== "instagram" && configuredPlatforms.includes(p.key)).map((p) => {
+          ] as const).filter((p) => configuredPlatforms.includes(p.key)).map((p) => {
             const connected = socialAccounts.filter((a: any) => a.platform === p.key);
             const hasAccounts = connected.length > 0;
 

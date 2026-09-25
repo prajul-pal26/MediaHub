@@ -181,9 +181,9 @@ export function InstagramSessions() {
               <Plus className="h-5 w-5" /> Add a session
             </DialogTitle>
             <DialogDescription>
-              Log into Instagram in your browser, then paste its complete Cookie header here. It must
-              include <code className="text-xs">sessionid</code>; keeping <code className="text-xs">csrftoken</code> too
-              lets MediaHub make the same authenticated request shape as the browser.
+              Log into Instagram in your browser → <strong>F12 → Application → Cookies →
+              instagram.com</strong> → copy the <code className="text-xs">sessionid</code> value and
+              paste it here.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -194,7 +194,7 @@ export function InstagramSessions() {
             />
             <Input
               type="password"
-              placeholder="Complete Cookie header (must include sessionid)"
+              placeholder="sessionid cookie value"
               value={pasteSession}
               onChange={(e) => setPasteSession(e.target.value)}
               className="font-mono text-sm"

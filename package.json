@@ -7,7 +7,6 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "fb:session:chrome": "bash scripts/facebook/import-chrome-session.sh",
     "ssl-proxy": "npx local-ssl-proxy --source 3443 --target 3000 --cert localhost+1.pem --key localhost+1-key.pem",
     "worker": "npx tsx worker.ts",
     "worker:dev": "npx tsx watch worker.ts",

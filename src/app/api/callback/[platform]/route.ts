@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/supabase/db";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { verifyState } from "@/server/trpc/routers/social-accounts";
+import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
 import { getRedis } from "@/lib/redis";
 import { randomUUID } from "crypto";
 
@@ -515,9 +516,30 @@ export async function GET(
 
       console.log("[social-callback] Updated existing account:", platformUsername);
 
-      // Connecting an account must stay lightweight. Historical imports and
-      // comment retrieval are explicit user actions, never an OAuth side
-      // effect: a reconnect previously reprocessed every active account.
+      // Queue historical import for reconnected account
+      try {
+        const queue = getHistoricalImportQueue();
+        await queue.add(`historical-${platform}-${state.brandId}`, {
+          accountId: existing.id,
+          brandId: state.brandId,
+          orgId: state.orgId,
+          platform,
+        });
+        console.log(`[social-callback] Queued historical import for ${platform}`);
+      } catch (e: any) {
+        console.error("[social-callback] Failed to queue historical import:", e.message);
+      }
+
+      // Queue comment sync for the reconnected account
+      try {
+        const commentSyncQueue = getCommentSyncQueue();
+        await commentSyncQueue.add(`comment-sync-${platform}-${state.brandId}`, {
+          brandId: state.brandId,
+        });
+        console.log(`[social-callback] Queued comment sync for ${platform}`);
+      } catch (e: any) {
+        console.error("[social-callback] Failed to queue comment sync:", e.message);
+      }
 
       return NextResponse.redirect(
         new URL(`/accounts?connected=${platform}&updated=true`, baseUrl)
@@ -525,7 +547,7 @@ export async function GET(
     }
 
     // Save new account
-    const { error: insertError } = await db.from("social_accounts").insert({
+    const { data: newAccount, error: insertError } = await db.from("social_accounts").insert({
       brand_id: state.brandId,
       platform,
       platform_user_id: platformUserId,
@@ -536,7 +558,7 @@ export async function GET(
       connection_method: "oauth",
       platform_metadata: platformMetadata,
       is_active: true,
-    });
+    }).select("id").single();
 
     if (insertError) {
       console.error("[social-callback] DB insert error:", insertError);
@@ -545,8 +567,30 @@ export async function GET(
       );
     }
 
-    // Keep OAuth completion side-effect free. Users can explicitly import
-    // history or sync comments when they need those data.
+    // Queue historical import for newly connected account
+    try {
+      const queue = getHistoricalImportQueue();
+      await queue.add(`historical-${platform}-${state.brandId}`, {
+        accountId: newAccount.id,
+        brandId: state.brandId,
+        orgId: state.orgId,
+        platform,
+      });
+      console.log(`[social-callback] Queued historical import for ${platform}`);
+    } catch (e: any) {
+      console.error("[social-callback] Failed to queue historical import:", e.message);
+    }
+
+    // Queue comment sync for the newly connected account
+    try {
+      const commentSyncQueue = getCommentSyncQueue();
+      await commentSyncQueue.add(`comment-sync-${platform}-${state.brandId}`, {
+        brandId: state.brandId,
+      });
+      console.log(`[social-callback] Queued comment sync for ${platform}`);
+    } catch (e: any) {
+      console.error("[social-callback] Failed to queue comment sync:", e.message);
+    }
 
     return NextResponse.redirect(
       new URL(`/accounts?connected=${platform}`, baseUrl)

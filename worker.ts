@@ -4693,40 +4693,39 @@ async function verifyStartup() {
     console.warn("  ⚠ FFmpeg not found — video processing limited");
   }
 
-  // Background work is deliberately opt-in. A running worker must not start
-  // polling every connected account simply because the dashboard is open.
-  // Manual queue actions are still available; setting this flag to "true"
-  // enables the periodic maintenance jobs below.
-  const automaticBackgroundJobsEnabled = process.env.ENABLE_AUTOMATIC_BACKGROUND_JOBS === "true";
-
   // Schedule cron jobs
   const analyticsQueue = new Queue("analytics-fetch", { connection: redis });
   const tokenQueue = new Queue("token-refresh", { connection: redis });
-  const trendQueue = new Queue("trend-forecast", { connection: redis });
-  const sentimentQueue = new Queue("comment-sentiment", { connection: redis });
-  const competitorQueue = new Queue("competitor-fetch", { connection: redis });
-  const commentSyncQueue = new Queue("comment-sync", { connection: redis });
-  const commentReplyQueue = new Queue("comment-reply", { connection: redis });
 
-  if (automaticBackgroundJobsEnabled) {
-    await analyticsQueue.add("fetch-all", {}, { repeat: { every: 6 * 60 * 60 * 1000 }, jobId: "analytics-cron" });
-    await tokenQueue.add("refresh-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "token-refresh-cron" });
-    await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
-    await sentimentQueue.add("analyze-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "comment-sentiment-cron" });
-    await competitorQueue.add("fetch-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "competitor-fetch-cron" });
-    await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
-    await commentReplyQueue.add("process-pending", {}, { repeat: { every: 5 * 60 * 1000 }, jobId: "comment-reply-cron" });
-    console.log("  ✓ Automatic background jobs enabled");
-  } else {
-    await analyticsQueue.removeRepeatable("fetch-all", { every: 6 * 60 * 60 * 1000 }, "analytics-cron");
-    await tokenQueue.removeRepeatable("refresh-all", { every: 24 * 60 * 60 * 1000 }, "token-refresh-cron");
-    await trendQueue.removeRepeatable("forecast-all", { every: 7 * 24 * 60 * 60 * 1000 }, "trend-forecast-cron");
-    await sentimentQueue.removeRepeatable("analyze-all", { every: 24 * 60 * 60 * 1000 }, "comment-sentiment-cron");
-    await competitorQueue.removeRepeatable("fetch-all", { every: 24 * 60 * 60 * 1000 }, "competitor-fetch-cron");
-    await commentSyncQueue.removeRepeatable("sync-all", { every: 2 * 60 * 60 * 1000 }, "comment-sync-cron");
-    await commentReplyQueue.removeRepeatable("process-pending", { every: 5 * 60 * 1000 }, "comment-reply-cron");
-    console.log("  • Automatic background jobs disabled; use manual actions when needed");
-  }
+  await analyticsQueue.add("fetch-all", {}, { repeat: { every: 6 * 60 * 60 * 1000 }, jobId: "analytics-cron" });
+  console.log("  ✓ Analytics cron (every 6 hours)");
+
+  await tokenQueue.add("refresh-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "token-refresh-cron" });
+  console.log("  ✓ Token refresh cron (daily)");
+
+  const trendQueue = new Queue("trend-forecast", { connection: redis });
+  await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
+  console.log("  ✓ Trend forecast cron (weekly)");
+
+  // Comment sentiment analysis — daily
+  const sentimentQueue = new Queue("comment-sentiment", { connection: redis });
+  await sentimentQueue.add("analyze-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "comment-sentiment-cron" });
+  console.log("  ✓ Comment sentiment cron (daily)");
+
+  // Competitor data fetch — daily
+  const competitorQueue = new Queue("competitor-fetch", { connection: redis });
+  await competitorQueue.add("fetch-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "competitor-fetch-cron" });
+  console.log("  ✓ Competitor fetch cron (daily)");
+
+  // Comment sync — every 2 hours
+  const commentSyncQueue = new Queue("comment-sync", { connection: redis });
+  await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
+  console.log("  ✓ Comment sync cron (every 2 hours)");
+
+  // Comment reply processing — every 30 seconds
+  const commentReplyQueue = new Queue("comment-reply", { connection: redis });
+  await commentReplyQueue.add("process-pending", {}, { repeat: { every: 5 * 60 * 1000 }, jobId: "comment-reply-cron" });
+  console.log("  ✓ Comment reply processing (every 30s)");
 }
 
 // ─── Instagram comment harvest ───
@@ -4785,11 +4784,7 @@ const instaCommentWorker = new Worker(
       "./src/server/services/instagram/comments"
     );
 
-    const allPosts: { mediaId: string; shortcode: string; commentCount: number }[] = run.posts ?? [];
-    const retryIds = Array.isArray(run.retry_media_ids)
-      ? new Set(run.retry_media_ids.filter((id: unknown): id is string => typeof id === "string"))
-      : null;
-    const posts = retryIds ? allPosts.filter((post) => retryIds.has(post.mediaId)) : allPosts;
+    const posts: { mediaId: string; shortcode: string; commentCount: number }[] = run.posts ?? [];
     if (!posts.length) return fail("Run has no posts");
 
     const startedAt = Date.now();
@@ -4798,28 +4793,8 @@ const instaCommentWorker = new Worker(
       .update({ status: "running", started_at: new Date().toISOString() })
       .eq("id", runId);
 
-    const shortcodeFor = new Map(allPosts.map((p) => [p.mediaId, p.shortcode]));
-    type PostProgress = {
-      status: "pending" | "running" | "complete" | "partial" | "failed";
-      reportedCount: number | null;
-      scrapedCount: number;
-      topLevelCount: number;
-      replyCount: number;
-      pagesFetched: number;
-      requestCount: number;
-      error?: string;
-    };
-    const perPost: Record<string, PostProgress> = Object.fromEntries(
-      Object.entries(run.progress?.perPost ?? {}).map(([mediaId, value]: [string, any]) => {
-        // Older runs stored only a numeric count. Preserve it rather than
-        // making a retry erase visible progress when upgrading this worker.
-        if (typeof value === "number") {
-          const expected = allPosts.find((post) => post.mediaId === mediaId)?.commentCount ?? null;
-          return [mediaId, { status: "partial", reportedCount: expected, scrapedCount: value, topLevelCount: value, replyCount: 0, pagesFetched: 0, requestCount: 0 }];
-        }
-        return [mediaId, value as PostProgress];
-      }),
-    );
+    const shortcodeFor = new Map(posts.map((p) => [p.mediaId, p.shortcode]));
+    const perPost: Record<string, number> = {};
     const governor = new CommentRateGovernor();
     const abort = new AbortController();
 
@@ -4828,7 +4803,7 @@ const instaCommentWorker = new Worker(
     const flush = async (force = false) => {
       if (!force && Date.now() - lastFlush < 3000) return;
       lastFlush = Date.now();
-      const total = Object.values(perPost).reduce((sum, post) => sum + post.scrapedCount, 0);
+      const total = Object.values(perPost).reduce((a, b) => a + b, 0);
       const secs = (Date.now() - startedAt) / 1000;
       await db()
         .from("insta_comment_runs")
@@ -4850,126 +4825,61 @@ const instaCommentWorker = new Worker(
       }
     }, 5000);
 
-    const persistResult = async (r: { mediaId: string; comments: any[]; reportedTotal: number | null; pagesFetched: number; requestCount: number; truncated: boolean; error?: string }) => {
-      const reportedCount = r.reportedTotal ?? allPosts.find((post) => post.mediaId === r.mediaId)?.commentCount ?? null;
-
-      // Checkpoint each completed post immediately. A worker restart, manual
-      // cancel, or rate-limit after this point never loses its comments.
-      const rows = r.comments.map((c) => ({
-        run_id: runId,
-        org_id: run.org_id,
-        post_media_id: r.mediaId,
-        post_shortcode: shortcodeFor.get(r.mediaId) ?? null,
-        comment_id: c.id,
-        comment_text: c.text,
-        comment_created_at: c.createdAt,
-        comment_likes: c.likeCount,
-        depth: c.depth,
-        parent_comment_id: c.parentId,
-        reply_count: c.replyCount,
-        commenter_username: c.username,
-        commenter_full_name: c.fullName,
-        commenter_user_id: c.userId,
-        commenter_verified: c.isVerified,
-      }));
-      for (let i = 0; i < rows.length; i += 1000) {
-        const { error } = await db().from("insta_comments").upsert(rows.slice(i, i + 1000), { onConflict: "run_id,comment_id", ignoreDuplicates: true });
-        if (error) throw new Error(`Could not checkpoint Instagram comments: ${error.message}`);
-      }
-
-      // Keep a local, merged media workspace in addition to the normalized
-      // audit rows. This is the source for UI deltas and retries, so a partial
-      // later pass never makes an earlier complete collection disappear.
-      const { data: existingMedia, error: existingError } = await db()
-        .from("insta_comment_media")
-        .select("comments_json")
-        .eq("org_id", run.org_id)
-        .eq("target_username", run.target_username)
-        .eq("media_id", r.mediaId)
-        .maybeSingle();
-      if (existingError) throw new Error(`Could not read Instagram comment workspace: ${existingError.message}`);
-      const commentsById = new Map<string, any>();
-      for (const comment of Array.isArray(existingMedia?.comments_json) ? existingMedia.comments_json : []) {
-        if (comment?.id != null) commentsById.set(String(comment.id), comment);
-      }
-      for (const comment of r.comments) if (comment?.id != null) commentsById.set(String(comment.id), comment);
-      const mergedComments = [...commentsById.values()];
-      const topLevelCount = mergedComments.filter((comment) => comment.depth === 0).length;
-      const replyCount = mergedComments.length - topLevelCount;
-      const status: PostProgress["status"] = r.error ? "failed" : r.truncated || (reportedCount != null && mergedComments.length < reportedCount) ? "partial" : "complete";
-      perPost[r.mediaId] = {
-        status,
-        reportedCount,
-        scrapedCount: mergedComments.length,
-        topLevelCount,
-        replyCount,
-        pagesFetched: r.pagesFetched,
-        requestCount: r.requestCount,
-        ...(r.error ? { error: r.error } : {}),
-      };
-      const post = allPosts.find((entry) => entry.mediaId === r.mediaId);
-      const { error: workspaceError } = await db().from("insta_comment_media").upsert({
-        org_id: run.org_id,
-        target_username: run.target_username,
-        media_id: r.mediaId,
-        shortcode: post?.shortcode ?? null,
-        media_url: (post as any)?.url ?? null,
-        media_kind: (post as any)?.kind ?? null,
-        likes_count: Number.isFinite((post as any)?.likes) ? (post as any).likes : null,
-        comments_count_reported: reportedCount,
-        comments_scraped_count: mergedComments.length,
-        comments_top_level_count: topLevelCount,
-        comments_reply_count: replyCount,
-        comments_status: status,
-        comments_stop_reason: r.truncated ? "pagination_incomplete" : null,
-        comments_error: r.error ?? null,
-        comments_json: mergedComments,
-        last_run_id: runId,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "org_id,target_username,media_id" });
-      if (workspaceError) throw new Error(`Could not save Instagram comment workspace: ${workspaceError.message}`);
-      await flush(true);
-    };
-
     try {
-      const { results, totalComments: harvestedComments, throttleCount, elapsedMs } = await harvestManyPosts(
+      const { results, totalComments, throttleCount, elapsedMs } = await harvestManyPosts(
         posts.map((p) => p.mediaId),
         session,
         {
           concurrency: run.concurrency ?? 5,
-          maxPerPost: run.comment_limit > 0 ? run.comment_limit : Infinity,
           includeReplies: Boolean(run.include_replies),
           governor,
           signal: abort.signal,
-          onProgress: ({ mediaId, fetched, reportedTotal }) => {
-            const previous = perPost[mediaId];
-            perPost[mediaId] = {
-              status: "running",
-              reportedCount: reportedTotal ?? previous?.reportedCount ?? allPosts.find((post) => post.mediaId === mediaId)?.commentCount ?? null,
-              scrapedCount: fetched,
-              topLevelCount: previous?.topLevelCount ?? fetched,
-              replyCount: previous?.replyCount ?? 0,
-              pagesFetched: previous?.pagesFetched ?? 0,
-              requestCount: previous?.requestCount ?? 0,
-            };
+          onProgress: ({ mediaId, fetched }) => {
+            perPost[mediaId] = fetched;
             void flush();
           },
-          onResult: persistResult,
         },
       );
 
-      const expected = run.expected_comments || allPosts.reduce((a, p) => a + p.commentCount, 0);
+      // Insert in chunks; a single post can carry tens of thousands of rows.
+      let inserted = 0;
+      for (const r of results) {
+        const rows = r.comments.map((c) => ({
+          run_id: runId,
+          org_id: run.org_id,
+          post_media_id: r.mediaId,
+          post_shortcode: shortcodeFor.get(r.mediaId) ?? null,
+          comment_id: c.id,
+          comment_text: c.text,
+          comment_created_at: c.createdAt,
+          comment_likes: c.likeCount,
+          depth: c.depth,
+          parent_comment_id: c.parentId,
+          reply_count: c.replyCount,
+          commenter_username: c.username,
+          commenter_full_name: c.fullName,
+          commenter_user_id: c.userId,
+          commenter_verified: c.isVerified,
+        }));
+        for (let i = 0; i < rows.length; i += 1000) {
+          const chunk = rows.slice(i, i + 1000);
+          const { error } = await db()
+            .from("insta_comments")
+            .upsert(chunk, { onConflict: "run_id,comment_id", ignoreDuplicates: true });
+          if (error) console.error(`[insta-comment-harvest] insert error: ${error.message}`);
+          else inserted += chunk.length;
+        }
+      }
+
+      const expected = run.expected_comments || posts.reduce((a, p) => a + p.commentCount, 0);
       const cancelled = abort.signal.aborted;
       const requestCount = results.reduce((a, r) => a + r.requestCount, 0);
       const secs = elapsedMs / 1000;
-      const { count: storedComments } = await db().from("insta_comments").select("id", { count: "exact", head: true }).eq("run_id", runId);
-      const totalComments = storedComments ?? harvestedComments;
-      const hasGap = Object.values(perPost).some((post) => post.status !== "complete" || (post.reportedCount != null && post.scrapedCount < post.reportedCount));
 
       await db()
         .from("insta_comment_runs")
         .update({
-          status: cancelled ? "cancelled" : hasGap ? "partial" : "completed",
+          status: cancelled ? "cancelled" : totalComments >= expected * 0.9 ? "completed" : "partial",
           total_comments: totalComments,
           coverage_pct: expected > 0 ? Math.round((totalComments / expected) * 1000) / 10 : null,
           request_count: requestCount,
@@ -4978,46 +4888,13 @@ const instaCommentWorker = new Worker(
           current_pace_ms: governor.current,
           duration_ms: elapsedMs,
           progress: { perPost, updatedAt: new Date().toISOString() },
-          retry_media_ids: null,
           completed_at: new Date().toISOString(),
           error: results.find((r) => r.error)?.error ?? null,
         })
         .eq("id", runId);
 
-      // Drive export is deliberately after the durable database checkpoint.
-      // A Drive quota/auth failure never turns a completed collection into a
-      // failed scrape.  Each profile is merged into one managed Google Sheet.
-      if (run.drive_brand_id) {
-        try {
-          const { syncInstagramProfileSheet } = await import("./src/server/services/instagram/drive-export");
-          const saved = await syncInstagramProfileSheet({
-            org_id: run.org_id,
-            role: "admin",
-            brand_id: run.drive_brand_id,
-            assigned_brands: [run.drive_brand_id],
-          }, { brandId: run.drive_brand_id, username: run.target_username });
-          await db().from("insta_comment_media").update({
-            drive_sheet_id: saved.id,
-            drive_sheet_url: saved.url,
-            drive_synced_at: new Date().toISOString(),
-          }).eq("org_id", run.org_id).eq("target_username", run.target_username);
-          await db().from("insta_comment_runs").update({
-            drive_export_status: "complete",
-            drive_export_error: null,
-            drive_exported_at: new Date().toISOString(),
-          }).eq("id", runId);
-        } catch (exportError: any) {
-          const message = exportError?.message ?? "Instagram Drive export failed";
-          await db().from("insta_comment_runs").update({
-            drive_export_status: "failed",
-            drive_export_error: message,
-          }).eq("id", runId);
-          console.error(`[insta-comment-harvest] ${runId} Drive export failed: ${message}`);
-        }
-      }
-
       console.log(
-        `[insta-comment-harvest] ${runId} done: ${totalComments} stored comments in ${(secs / 60).toFixed(1)}min, ${throttleCount} throttles`,
+        `[insta-comment-harvest] ${runId} done: ${totalComments} comments (${inserted} stored) in ${(secs / 60).toFixed(1)}min, ${throttleCount} throttles`,
       );
     } catch (err: any) {
       await fail(err?.message ?? "harvest crashed");

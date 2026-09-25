@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { FacebookSessionBridge } from "./FacebookSessionBridge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -296,8 +295,6 @@ export function FacebookSessions() {
             </Button>
           </div>
         </div>
-
-        <FacebookSessionBridge sessions={sessions} />
 
         {sessionsQuery.isLoading ? (
           <div className="h-10 rounded-lg bg-muted/60 animate-pulse" />

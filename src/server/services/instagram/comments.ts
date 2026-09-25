@@ -42,8 +42,6 @@ export interface InstaComment {
   isVerified: boolean;
   /** Replies Instagram says exist on this comment (may exceed those returned). */
   replyCount: number;
-  /** Non-text comment payload, retained in the JSON workspace for audit. */
-  attachmentKind: "media" | "voice" | "visual" | null;
 }
 
 export interface CommentHarvestResult {
@@ -97,7 +95,6 @@ function mapComment(raw: any, depth: number, parentId: string | null): InstaComm
     profilePic: raw?.user?.profile_pic_url ?? null,
     isVerified: Boolean(raw?.user?.is_verified),
     replyCount: Number(raw?.child_comment_count ?? 0) || 0,
-    attachmentKind: raw?.media_share ? "media" : raw?.voice_media ? "voice" : raw?.visual_media ? "visual" : null,
   };
 }
 
@@ -465,10 +462,6 @@ export interface BulkHarvestOptions {
   includeReplies?: boolean;
   governor?: CommentRateGovernor;
   onProgress?: (p: BulkHarvestProgress) => void;
-  /** Persist one settled post before another one is claimed. This makes a
-   * long harvest restart-safe instead of retaining every comment only in RAM
-   * until the whole selection ends. */
-  onResult?: (result: CommentHarvestResult & { error?: string }) => Promise<void> | void;
   signal?: AbortSignal;
 }
 
@@ -493,7 +486,6 @@ export async function harvestManyPosts(
     includeReplies = true,
     governor = new CommentRateGovernor(),
     onProgress,
-    onResult,
     signal,
   } = options;
 
@@ -518,7 +510,6 @@ export async function harvestManyPosts(
           },
         });
         results.push(r);
-        await onResult?.(r);
         onProgress?.({ mediaId, fetched: r.comments.length, reportedTotal: r.reportedTotal, done: true });
       } catch (err: any) {
         if (err instanceof InstaRateLimitError) {
@@ -529,7 +520,7 @@ export async function harvestManyPosts(
           continue;
         }
         if (err instanceof InstaAuthError) throw err;
-        const failed = {
+        results.push({
           mediaId,
           comments: [],
           reportedTotal: null,
@@ -538,9 +529,7 @@ export async function harvestManyPosts(
           truncated: true,
           elapsedMs: 0,
           error: err?.message ?? "harvest failed",
-        };
-        results.push(failed);
-        await onResult?.(failed);
+        });
       }
     }
   };
