@@ -12,6 +12,8 @@
  * Use a throwaway account's session id — never a personal one.
  */
 
+import type { InstaComment } from "./comments";
+
 const IG_APP_ID = "936619743392459";
 const MOBILE_UA =
   "Instagram 12.0.0.16.90 (iPhone9,4; iOS 10_3_3; en_US; en-US; scale=2.61; gamut=wide; 1080x1920) AppleWebKit/420+";
@@ -21,6 +23,64 @@ const PROFILE_ENDPOINT =
   "https://www.instagram.com/api/v1/users/web_profile_info/?username=";
 const LOGIN_PAGE = "https://www.instagram.com/accounts/login/";
 const LOGIN_ENDPOINT = "https://www.instagram.com/accounts/login/ajax/";
+
+const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/**
+ * Convert an Instagram shortcode (e.g. 'DcC-6etJ6zD') to a numeric media ID in 0ms (pure local BigInt decode).
+ */
+export function shortcodeToMediaId(shortcode: string): string {
+  let value = BigInt(0);
+  for (const ch of shortcode) {
+    const idx = SHORTCODE_ALPHABET.indexOf(ch);
+    if (idx < 0) continue;
+    value = value * BigInt(64) + BigInt(idx);
+  }
+  return value.toString();
+}
+
+/**
+ * Extract clean Instagram shortcode from any URL or raw shortcode.
+ * Handles /reel/, /reels/, /p/, /tv/, /share/reel/, or direct shortcode string.
+ */
+export function extractInstagramShortcode(input: string): string | null {
+  if (!input) return null;
+  const s = input.trim();
+  const urlMatch = /(?:instagram\.com\/(?:[a-zA-Z0-9._]+\/)?(?:reel|reels|p|tv|share\/reel)\/)([A-Za-z0-9_-]+)/i.exec(s);
+  if (urlMatch && urlMatch[1]) return urlMatch[1];
+  const cleaned = s.replace(/https?:\/\/(?:www\.)?instagram\.com\//i, "").split(/[/?#]/)[0];
+  if (/^[A-Za-z0-9_-]{5,}$/.test(cleaned)) return cleaned;
+  return null;
+}
+
+/**
+ * Extract clean Instagram username from any input:
+ * - https://www.instagram.com/dr_arun_kumar_saxena
+ * - https://instagram.com/dr_arun_kumar_saxena/?igsh=...
+ * - @dr_arun_kumar_saxena
+ * - dr_arun_kumar_saxena
+ */
+export function extractInstagramUsername(input: string): string {
+  if (!input) return "";
+  const s = input.trim();
+  const match = s.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)/i);
+  if (match && match[1]) {
+    const part = match[1].toLowerCase();
+    if (!["p", "reel", "reels", "stories", "explore", "tv", "direct"].includes(part)) {
+      return part;
+    }
+  }
+  return s
+    .replace(/^[#@]+/, "")
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/+$/, "")
+    .split("/")
+    .pop()
+    ?.toLowerCase()
+    .replace(/^[#@]+/, "")
+    .trim() || "";
+}
 
 export interface InstaLoginResult {
   ok: boolean;
@@ -230,7 +290,15 @@ export class InstaRateLimitError extends Error {}
  * bot signal that gets the session killed quickly.
  */
 export function normalizeSession(raw: string): { cookie: string; csrftoken: string | null } {
-  const s = raw.trim();
+  // DevTools' "Copy value" can include the literal `Cookie:` header name.
+  // Store/import either shape, but never send `Cookie:` as part of the header
+  // value or as a Playwright cookie name.
+  const s = raw
+    .trim()
+    .replace(/^cookie\s*:\s*/i, "")
+    // Chrome's copied request-header label can be separated from the first
+    // cookie with whitespace rather than a colon ("cookie datr=...").
+    .replace(/^cookie\s+/i, "");
   const looksLikeCookieString = /(^|;\s*)[a-zA-Z_]+=/.test(s) && s.includes("=");
 
   if (looksLikeCookieString) {
@@ -511,6 +579,23 @@ export interface InstaCarouselChild {
   isVideo: boolean;
 }
 
+/**
+ * Geotag attached to a post/reel. Instagram sources these from Facebook Places,
+ * so `name` ranges from a precise venue to a whole country ("India"). Only a
+ * minority of posts carry one — roughly a quarter in sampling — because tagging
+ * a location is optional for the poster.
+ */
+export interface InstaLocation {
+  id: string | null;
+  name: string;
+  shortName: string | null;
+  address: string | null;
+  city: string | null;
+  lat: number | null;
+  lng: number | null;
+  facebookPlacesId: string | null;
+}
+
 export interface InstaMediaItem {
   id: string;
   shortcode: string;
@@ -526,6 +611,12 @@ export interface InstaMediaItem {
   carousel: InstaCarouselChild[];
   /** Posting account, when the payload carries it (hashtag search does). */
   ownerUsername?: string | null;
+  /** Geotag, when the poster attached one. Null far more often than not. */
+  location?: InstaLocation | null;
+  /** Fetched comments list when includeComments is requested */
+  commentsData?: InstaComment[];
+  /** Error message if comment harvesting failed for this post */
+  commentsError?: string;
 }
 
 export interface InstaFeedResult {
@@ -537,6 +628,24 @@ function bestImage(node: any): string | null {
   const c = node?.image_versions2?.candidates;
   return Array.isArray(c) && c.length ? c[0].url : null;
 }
+/** Normalize Instagram's raw location blob; returns null when untagged. */
+function mapLocation(raw: any): InstaLocation | null {
+  if (!raw || typeof raw !== "object") return null;
+  const name = raw.name ?? "";
+  if (!name) return null;
+  const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    id: raw.pk != null ? String(raw.pk) : null,
+    name,
+    shortName: raw.short_name ?? null,
+    address: raw.address || null,
+    city: raw.city || null,
+    lat: numOrNull(raw.lat),
+    lng: numOrNull(raw.lng),
+    facebookPlacesId: raw.facebook_places_id != null ? String(raw.facebook_places_id) : null,
+  };
+}
+
 function bestVideo(node: any): string | null {
   const v = node?.video_versions;
   return Array.isArray(v) && v.length ? v[0].url : null;
@@ -554,12 +663,13 @@ export async function fetchUserFeed(
   if (!sessionRaw) throw new InstaAuthError("A valid session is required to read the content feed");
   const session = normalizeSession(sessionRaw);
   const headers = igApiHeaders(session);
-  const cap = Math.min(Math.max(maxCount, 1), 200);
+  const cap = Math.min(Math.max(maxCount, 1), 1000);
   const items: InstaMediaItem[] = [];
   let maxId: string | null = null;
   let truncated = false;
 
-  for (let page = 0; page < 20; page++) {
+  const maxPages = Math.min(Math.ceil(cap / 24) + 1, 60);
+  for (let page = 0; page < maxPages; page++) {
     const url =
       `https://www.instagram.com/api/v1/feed/user/${encodeURIComponent(userId)}/` +
       `?count=24${maxId ? `&max_id=${encodeURIComponent(maxId)}` : ""}`;
@@ -732,6 +842,7 @@ export async function fetchHashtagMedia(
       takenAt: typeof it?.taken_at === "number" ? it.taken_at : null,
       carousel,
       ownerUsername: it?.user?.username ?? it?.owner?.username ?? null,
+      location: mapLocation(it?.location),
     });
     if (items.length >= maxCount) break;
   }
@@ -744,11 +855,82 @@ export async function fetchHashtagMedia(
   };
 }
 
+async function fetchProfileFromHtml(username: string): Promise<InstaProfile | null> {
+  try {
+    const res = await fetch(`https://www.instagram.com/${encodeURIComponent(username)}/`, {
+      headers: {
+        "User-Agent": DESKTOP_UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    let followers = 0;
+    let following = 0;
+    let postsCount = 0;
+    const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+    if (ogDescMatch) {
+      const desc = ogDescMatch[1];
+      const fMatch = desc.match(/([0-9.,KMBkmb]+)\s+Followers/i);
+      const foMatch = desc.match(/([0-9.,KMBkmb]+)\s+Following/i);
+      const pMatch = desc.match(/([0-9.,KMBkmb]+)\s+Posts/i);
+      const parseCount = (s?: string) => {
+        if (!s) return 0;
+        const cleaned = s.replace(/,/g, "").trim().toUpperCase();
+        if (cleaned.endsWith("M")) return Math.round(parseFloat(cleaned) * 1_000_000);
+        if (cleaned.endsWith("K")) return Math.round(parseFloat(cleaned) * 1_000);
+        if (cleaned.endsWith("B")) return Math.round(parseFloat(cleaned) * 1_000_000_000);
+        return parseInt(cleaned, 10) || 0;
+      };
+      if (fMatch) followers = parseCount(fMatch[1]);
+      if (foMatch) following = parseCount(foMatch[1]);
+      if (pMatch) postsCount = parseCount(pMatch[1]);
+    }
+
+    const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+    let fullName = "";
+    if (ogTitleMatch) {
+      const parts = ogTitleMatch[1].split("(@");
+      if (parts[0]) fullName = parts[0].replace(/•.*/, "").trim();
+    }
+
+    const ogImageMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+    const profilePic = ogImageMatch ? ogImageMatch[1].replace(/&amp;/g, "&") : null;
+
+    if (followers > 0 || postsCount > 0 || profilePic) {
+      return {
+        id: "",
+        username,
+        fullName: fullName || username,
+        bio: "",
+        profilePic,
+        externalUrl: null,
+        isPrivate: false,
+        isVerified: false,
+        isBusiness: false,
+        category: null,
+        followers,
+        following,
+        postsCount,
+        engagementRate: null,
+        recentPosts: [],
+      };
+    }
+  } catch {}
+  return null;
+}
+
 export async function fetchInstagramProfile(
   usernameRaw: string,
   sessionId?: string,
 ): Promise<InstaProfile> {
-  const username = usernameRaw.trim().replace(/^@/, "").toLowerCase();
+  const username = extractInstagramUsername(usernameRaw);
   if (!username || !/^[a-zA-Z0-9._]{1,30}$/.test(username)) {
     throw new Error(`Invalid Instagram username: "${usernameRaw}"`);
   }
@@ -790,7 +972,7 @@ export async function fetchInstagramProfile(
   };
 
   const hasAuth = Boolean(headers["Cookie"]);
-  let res: Response;
+  let res: Response | null = null;
   try {
     res = await doFetch(hasAuth);
     // A bad/expired session must not block public profile data — retry anonymously.
@@ -798,6 +980,8 @@ export async function fetchInstagramProfile(
       res = await doFetch(false);
     }
   } catch (err: any) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
     throw new Error(
       err?.name === "AbortError"
         ? "Instagram request timed out"
@@ -805,22 +989,37 @@ export async function fetchInstagramProfile(
     );
   }
 
-  if (res.status === 404) throw new Error(`User "@${username}" not found`);
-  if (res.status === 429)
-    throw new Error("Rate limited by Instagram — wait a few minutes and try again");
-  if (res.status === 401 || res.status === 403)
-    throw new Error("Instagram rate-limited this lookup — wait a few minutes and try again");
-  if (!res.ok) throw new Error(`Instagram returned HTTP ${res.status}`);
+  if (res && res.status === 404) throw new Error(`User "@${username}" not found`);
+  // Do not disguise an Instagram throttle as a successful public-profile
+  // fallback. A fallback has no internal user ID, so it cannot discover media
+  // links or start the durable comment job. Callers need the real condition.
+  if (res?.status === 429) {
+    throw new InstaRateLimitError("Instagram is rate limiting this session — wait a while before retrying");
+  }
+
+  if (!res || !res.ok) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
+    if (res?.status === 401 || res?.status === 403)
+      throw new Error("Instagram rate-limited this lookup — wait a few minutes and try again");
+    throw new Error(`Instagram returned HTTP ${res?.status ?? "unknown"}`);
+  }
 
   let json: any;
   try {
     json = await res.json();
   } catch {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
     throw new Error("Instagram returned a non-JSON response (likely a login wall)");
   }
 
   const user = json?.data?.user;
-  if (!user) throw new Error(`No profile data returned for "@${username}"`);
+  if (!user) {
+    const fallback = await fetchProfileFromHtml(username);
+    if (fallback) return fallback;
+    throw new Error(`No profile data returned for "@${username}"`);
+  }
 
   const recentPosts = parsePosts(user);
   const followers = num(user?.edge_followed_by?.count);
@@ -849,5 +1048,272 @@ export async function fetchInstagramProfile(
     postsCount: num(user?.edge_owner_to_timeline_media?.count),
     engagementRate,
     recentPosts,
+  };
+}
+
+/**
+ * Small authenticated lookup used when Instagram rejects the older
+ * web_profile_info endpoint. The browser still uses this search route to
+ * resolve an exact username before requesting its Profile Posts GraphQL data.
+ * It deliberately returns only fields that this response actually exposes;
+ * follower/post totals remain unknown rather than being invented as zero.
+ */
+export async function fetchInstagramProfileFromSearch(
+  usernameRaw: string,
+  sessionRaw: string,
+): Promise<InstaProfile> {
+  const username = extractInstagramUsername(usernameRaw);
+  if (!username || !/^[a-zA-Z0-9._]{1,30}$/.test(username)) {
+    throw new Error(`Invalid Instagram username: "${usernameRaw}"`);
+  }
+  if (!sessionRaw) throw new InstaAuthError("A valid session is required to resolve this profile");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20_000);
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://www.instagram.com/web/search/topsearch/?context=blended&query=${encodeURIComponent(username)}`,
+      { headers: igApiHeaders(normalizeSession(sessionRaw)), signal: controller.signal, cache: "no-store" },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new InstaAuthError("Instagram rejected the saved session");
+  }
+  if (response.status === 429) throw new InstaRateLimitError("Instagram is temporarily limiting profile lookup");
+  const payload: any = await response.json().catch(() => null);
+  const candidate = Array.isArray(payload?.users)
+    ? payload.users.find((entry: any) => String(entry?.user?.username ?? "").toLowerCase() === username)?.user
+    : null;
+  if (!response.ok || !candidate) throw new Error(`Instagram could not resolve "@${username}"`);
+
+  return {
+    id: String(candidate?.pk ?? candidate?.id ?? ""),
+    username: candidate?.username ?? username,
+    fullName: candidate?.full_name ?? username,
+    bio: "",
+    profilePic: candidate?.profile_pic_url ?? null,
+    externalUrl: null,
+    isPrivate: Boolean(candidate?.is_private),
+    isVerified: Boolean(candidate?.is_verified),
+    isBusiness: false,
+    category: null,
+    // This response does not expose these totals. Keep the existing type
+    // stable, but leave their display as unavailable at the caller layer.
+    followers: 0,
+    following: 0,
+    postsCount: 0,
+    engagementRate: null,
+    recentPosts: [],
+  };
+}
+
+export interface InstaVideoDownloadInfo {
+  ok: boolean;
+  shortcode: string;
+  mediaId: string;
+  mediaType: "video" | "reel" | "post" | "carousel";
+  videoUrl?: string | null;
+  videoVersions: Array<{
+    width: number;
+    height: number;
+    url: string;
+    resolution: string;
+  }>;
+  thumbnailUrl?: string | null;
+  caption?: string;
+  ownerUsername?: string;
+  ownerFullName?: string;
+  ownerProfilePicUrl?: string | null;
+  ownerIsVerified?: boolean;
+  width?: number | null;
+  height?: number | null;
+  hasAudio?: boolean | null;
+  duration?: number | null;
+  viewCount?: number | null;
+  likeCount?: number | null;
+  commentCount?: number | null;
+  postedAt?: string | null;
+  error?: string;
+}
+
+export async function fetchInstagramVideoDetails(
+  inputUrlOrShortcode: string,
+  sessionCookie?: string,
+  csrftoken?: string
+): Promise<InstaVideoDownloadInfo> {
+  const shortcode = extractInstagramShortcode(inputUrlOrShortcode);
+  if (!shortcode) {
+    return {
+      ok: false,
+      shortcode: "",
+      mediaId: "",
+      mediaType: "video",
+      videoVersions: [],
+      error: "Invalid Instagram link. Please paste a valid Reel or Post URL (e.g. https://www.instagram.com/reel/Ddl_CGBA_hO/).",
+    };
+  }
+
+  const mediaId = shortcodeToMediaId(shortcode);
+
+  const headers: Record<string, string> = {
+    "User-Agent":
+      "Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Xiaomi; MI 5s; capricorn; qcom; en_US)",
+    "X-IG-App-ID": "936619743392459",
+    Referer: "https://www.instagram.com/",
+    Accept: "*/*",
+  };
+  if (sessionCookie) headers["Cookie"] = sessionCookie;
+  if (csrftoken) headers["x-csrftoken"] = csrftoken;
+
+  // 1. Primary: Instagram Media Info endpoint
+  try {
+    const res = await fetch(`https://www.instagram.com/api/v1/media/${mediaId}/info/`, {
+      headers,
+      cache: "no-store",
+    });
+
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      const item = data?.items?.[0];
+      if (item) {
+        let rawVideos: Array<{ width: number; height: number; url: string }> = item.video_versions || [];
+
+        // Check carousel items if top-level has no video_versions
+        if ((!rawVideos || rawVideos.length === 0) && Array.isArray(item.carousel_media)) {
+          for (const cm of item.carousel_media) {
+            if (Array.isArray(cm.video_versions) && cm.video_versions.length > 0) {
+              rawVideos = cm.video_versions;
+              break;
+            }
+          }
+        }
+
+        const videoVersions = rawVideos.map((v) => ({
+          width: v.width,
+          height: v.height,
+          url: v.url,
+          resolution: `${v.width}x${v.height}${v.height >= 720 ? " (HD)" : ""}`,
+        }));
+
+        videoVersions.sort((a, b) => b.width * b.height - a.width * a.height);
+
+        const bestVideoUrl = videoVersions[0]?.url || null;
+        const thumbnail = item.image_versions2?.candidates?.[0]?.url || null;
+        const caption = item.caption?.text || "";
+        const duration = item.video_duration ? Math.round(item.video_duration) : null;
+        const viewCount = item.play_count ?? item.view_count ?? item.ig_play_count ?? null;
+        const likeCount = item.like_count ?? null;
+        const commentCount = item.comment_count ?? null;
+        const postedAt = item.taken_at ? new Date(item.taken_at * 1000).toISOString() : null;
+
+        const isVideo = Boolean(bestVideoUrl || item.is_video || item.media_type === 2);
+
+        return {
+          ok: true,
+          shortcode,
+          mediaId,
+          mediaType: item.product_type === "clips" ? "reel" : isVideo ? "video" : item.media_type === 8 ? "carousel" : "post",
+          videoUrl: bestVideoUrl,
+          videoVersions,
+          thumbnailUrl: thumbnail,
+          caption,
+          ownerUsername: item.user?.username || "",
+          ownerFullName: item.user?.full_name || "",
+          ownerProfilePicUrl: item.user?.profile_pic_url || null,
+          ownerIsVerified: Boolean(item.user?.is_verified),
+          width: videoVersions[0]?.width || item.original_width || null,
+          height: videoVersions[0]?.height || item.original_height || null,
+          hasAudio: item.has_audio != null ? Boolean(item.has_audio) : null,
+          duration,
+          viewCount,
+          likeCount,
+          commentCount,
+          postedAt,
+          ...(!isVideo ? { error: "This Instagram post does not contain any video." } : {}),
+        };
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[fetchInstagramVideoDetails] API v1 fetch failed: ${err.message}`);
+  }
+
+  // 2. Fallback: GraphQL web endpoint
+  try {
+    const gqlUrl = `https://www.instagram.com/graphql/query/?query_hash=b3055c2e470edab04254823307423708&variables=${encodeURIComponent(
+      JSON.stringify({ shortcode })
+    )}`;
+    const gqlRes = await fetch(gqlUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Referer: `https://www.instagram.com/reel/${shortcode}/`,
+        ...(sessionCookie ? { Cookie: sessionCookie } : {}),
+      },
+      cache: "no-store",
+    });
+    if (gqlRes.ok) {
+      const gData = await gqlRes.json().catch(() => null);
+      const shortcodeMedia = gData?.data?.shortcode_media;
+      if (shortcodeMedia) {
+        const videoUrl = shortcodeMedia.video_url || null;
+        const thumbnail = shortcodeMedia.display_url || null;
+        const caption =
+          shortcodeMedia.edge_media_to_caption?.edges?.[0]?.node?.text || "";
+        const likeCount =
+          shortcodeMedia.edge_media_preview_like?.count ?? null;
+        const commentCount =
+          shortcodeMedia.edge_media_to_comment?.count ?? null;
+        const viewCount =
+          shortcodeMedia.video_view_count ?? shortcodeMedia.video_play_count ?? null;
+        const postedAt = shortcodeMedia.taken_at_timestamp
+          ? new Date(shortcodeMedia.taken_at_timestamp * 1000).toISOString()
+          : null;
+
+        return {
+          ok: true,
+          shortcode,
+          mediaId,
+          mediaType: shortcodeMedia.is_video ? "video" : "post",
+          videoUrl,
+          videoVersions: videoUrl
+            ? [
+                {
+                  width: shortcodeMedia.dimensions?.width || 720,
+                  height: shortcodeMedia.dimensions?.height || 1280,
+                  url: videoUrl,
+                  resolution: "High Definition (HD)",
+                },
+              ]
+            : [],
+          thumbnailUrl: thumbnail,
+          caption,
+          ownerUsername: shortcodeMedia.owner?.username || "",
+          ownerFullName: shortcodeMedia.owner?.full_name || "",
+          ownerProfilePicUrl: shortcodeMedia.owner?.profile_pic_url || null,
+          ownerIsVerified: Boolean(shortcodeMedia.owner?.is_verified),
+          width: shortcodeMedia.dimensions?.width || null,
+          height: shortcodeMedia.dimensions?.height || null,
+          duration: shortcodeMedia.video_duration || null,
+          viewCount,
+          likeCount,
+          commentCount,
+          postedAt,
+        };
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[fetchInstagramVideoDetails] GraphQL fallback failed: ${err.message}`);
+  }
+
+  return {
+    ok: false,
+    shortcode,
+    mediaId,
+    mediaType: "video",
+    videoVersions: [],
+    error: "Could not retrieve Instagram video. Please check the URL and make sure the post is public.",
   };
 }

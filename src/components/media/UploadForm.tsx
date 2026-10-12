@@ -21,6 +21,10 @@ interface FileWithMeta {
 
 interface UploadFormProps {
   brandId: string;
+  // Embedded in the Media Library: fit the surrounding width and, after a
+  // successful upload, reset + refresh the list in place instead of navigating.
+  embedded?: boolean;
+  onUploaded?: () => void;
 }
 
 function calculateAspectRatio(w: number, h: number): string {
@@ -29,41 +33,56 @@ function calculateAspectRatio(w: number, h: number): string {
   return `${w / d}:${h / d}`;
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => resolve("");
-    reader.readAsDataURL(file);
-  });
-}
+// This thumbnail is stored in `media_assets.metadata` (JSONB) and read back by
+// every media query, so it has to stay a thumbnail: encoding the untouched
+// original put whole multi-megabyte images in the row.
+const THUMBNAIL_MAX_EDGE = 400;
 
-function captureVideoFrame(video: HTMLVideoElement): string {
+function captureThumbnail(
+  source: HTMLImageElement | HTMLVideoElement,
+  sourceWidth: number,
+  sourceHeight: number
+): string | undefined {
+  if (!sourceWidth || !sourceHeight) return undefined;
+
+  const scale = Math.min(1, THUMBNAIL_MAX_EDGE / Math.max(sourceWidth, sourceHeight));
   const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+
   const ctx = canvas.getContext("2d");
-  if (ctx) {
-    ctx.drawImage(video, 0, 0);
-  }
-  return canvas.toDataURL("image/jpeg", 0.85);
+  if (!ctx) return undefined;
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+  // Browsers without WebP encoding hand back a PNG data URL instead of failing,
+  // which would be larger than the JPEG we actually want.
+  const webp = canvas.toDataURL("image/webp", 0.7);
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.7);
 }
 
 async function readImageMeta(file: File): Promise<{ width: number; height: number; aspectRatio: string; thumbnail?: string }> {
-  const thumbnail = await fileToBase64(file);
   return new Promise((resolve) => {
     const img = new window.Image();
+    const objectUrl = URL.createObjectURL(file);
+
     img.onload = () => {
-      URL.revokeObjectURL(img.src);
+      const { naturalWidth: width, naturalHeight: height } = img;
+      const thumbnail = captureThumbnail(img, width, height);
+      URL.revokeObjectURL(objectUrl);
       resolve({
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-        aspectRatio: calculateAspectRatio(img.naturalWidth, img.naturalHeight),
+        width,
+        height,
+        aspectRatio: width && height ? calculateAspectRatio(width, height) : "",
         thumbnail,
       });
     };
-    img.onerror = () => resolve({ width: 0, height: 0, aspectRatio: "", thumbnail });
-    img.src = URL.createObjectURL(file);
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve({ width: 0, height: 0, aspectRatio: "" });
+    };
+
+    img.src = objectUrl;
   });
 }
 
@@ -78,7 +97,7 @@ async function readVideoMeta(file: File): Promise<{ width: number; height: numbe
     };
 
     video.onseeked = () => {
-      const thumbnail = captureVideoFrame(video);
+      const thumbnail = captureThumbnail(video, video.videoWidth, video.videoHeight);
       URL.revokeObjectURL(video.src);
       resolve({
         width: video.videoWidth,
@@ -103,7 +122,7 @@ async function readVideoMeta(file: File): Promise<{ width: number; height: numbe
   });
 }
 
-export function UploadForm({ brandId }: UploadFormProps) {
+export function UploadForm({ brandId, embedded = false, onUploaded }: UploadFormProps) {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<FileWithMeta[]>([]);
@@ -209,7 +228,19 @@ export function UploadForm({ brandId }: UploadFormProps) {
       }
 
       toast.success(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""} to library`);
-      router.push("/library");
+      if (onUploaded) {
+        // Embedded in the library: clear the form and refresh the grid in place.
+        setFiles([]);
+        setTitle("");
+        setCaption("");
+        setDescription("");
+        setNotes("");
+        setTags([]);
+        setTagInput("");
+        onUploaded();
+      } else {
+        router.push("/library");
+      }
     } catch (e: any) {
       toast.error(e.message);
     } finally {
@@ -218,7 +249,7 @@ export function UploadForm({ brandId }: UploadFormProps) {
   }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className={embedded ? "space-y-6" : "max-w-3xl mx-auto space-y-6"}>
       {/* Drop zone */}
       <Card>
         <CardContent className="pt-6">

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>/Users/pranjul/workspace/MediaHub/scripts/assets/fonts</dir>
+  <cachedir>/tmp/mediahub-fontconfig-cache</cachedir>
+</fontconfig>

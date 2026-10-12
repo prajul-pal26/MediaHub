@@ -47,13 +47,28 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # Chromium for the Playwright-based Facebook page scraper (session rendering).
+#
+# ffmpeg is here too, and is NOT optional:
+#  - the media proxy renders a poster frame for video cards, without which every
+#    video tile streams a multi-megabyte file from Drive just to paint one frame;
+#  - /api/upload's ffprobe call otherwise fails silently and writes
+#    {width:0, height:0, duration:null}, and getValidActions treats a falsy
+#    ratio/duration as PASSING every platform check — so a 10-minute video would
+#    be offered as an Instagram Reel.
 RUN apk add --no-cache \
-    chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+    ffmpeg chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    CHROMIUM_PATH=/usr/bin/chromium-browser
+    CHROMIUM_PATH=/usr/bin/chromium \
+    FB_HEADFUL=1
 
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
+
+# Thumbnail cache. A real directory owned by the runtime user so a Docker volume
+# mounted here inherits writable ownership — an in-memory cache alone is lost on
+# every restart, which is exactly when the library feels slowest.
+ENV MEDIA_CACHE_DIR=/var/cache/media
+RUN mkdir -p /var/cache/media && chown -R nextjs:nodejs /var/cache/media
 
 # Copy standalone server + static assets
 COPY --from=builder /app/public ./public
@@ -68,10 +83,16 @@ ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 CMD ["node", "server.js"]
 
-# ─── Worker (doesn't need Next.js build, just tsx + node_modules) ───
+# ─── Worker ───
+# Facebook jobs may be dispatched from worker-owned flows. Keep its browser
+# runtime aligned with the app image so those jobs never fail at launch time.
 FROM node:20-alpine AS worker
-RUN apk add --no-cache libc6-compat ffmpeg
+RUN apk add --no-cache \
+    libc6-compat ffmpeg chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 WORKDIR /app
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    CHROMIUM_PATH=/usr/bin/chromium \
+    FB_HEADFUL=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 CMD ["npx", "tsx", "worker.ts"]
@@ -84,11 +105,12 @@ FROM base AS dev
 ENV NODE_ENV=development
 # ffmpeg (worker) + chromium (Facebook scraper) so the same image runs both.
 RUN apk add --no-cache \
-    ffmpeg chromium nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
+    ffmpeg chromium xvfb nss freetype harfbuzz ca-certificates ttf-freefont font-noto-emoji
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    CHROMIUM_PATH=/usr/bin/chromium-browser \
+    CHROMIUM_PATH=/usr/bin/chromium \
     NEXT_TELEMETRY_DISABLED=1 \
-    WATCHPACK_POLLING=true
+    WATCHPACK_POLLING=true \
+    FB_HEADFUL=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 EXPOSE 3000

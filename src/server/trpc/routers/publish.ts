@@ -39,12 +39,17 @@ export const publishRouter = router({
         validActions: getValidActions(asset, group.variant_count),
       }));
 
-      // Get previous publish jobs for this group (completed/processing/queued)
+      // Get previous publish jobs for this group. Include partial_published and
+      // failed posts too: a post is "partial_published" when some accounts
+      // succeeded and others failed, and those already-completed jobs must still
+      // lock their accounts as "already published". The per-job status (checked
+      // on the client) decides what actually counts as done, so failed/dead jobs
+      // stay selectable for a manual one-by-one retry.
       const { data: previousJobs } = await db
         .from("content_posts")
         .select("id, status, publish_jobs(id, asset_id, social_account_id, action, status, platform_post_id)")
         .eq("group_id", input.groupId)
-        .in("status", ["published", "publishing", "scheduled"]);
+        .in("status", ["published", "publishing", "scheduled", "partial_published", "failed"]);
 
       // Flatten all previous jobs
       const flatPreviousJobs = (previousJobs || []).flatMap((post: any) =>
@@ -158,6 +163,10 @@ export const publishRouter = router({
             asset_id: job.assetId,
             social_account_id: job.socialAccountId,
             action: job.action,
+            // Resizing/cropping is the Editor's job now: it renders a new asset
+            // before publishing, and the worker never acted on this value. The
+            // column is kept only so historical rows stay readable — nothing
+            // should start depending on it again.
             resize_option: job.resizeOption,
             status: "queued",
           })

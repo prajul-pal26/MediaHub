@@ -1,39 +1,39 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { MediaGroupCard } from "./MediaGroupCard";
+import { EditableMediaGroup, MediaEditorPanel } from "./MediaEditorPanel";
+import { UploadForm } from "./UploadForm";
 import { trpc } from "@/lib/trpc/client";
 import { toast } from "sonner";
-import { Image, Upload, Search, FileVideo, Layers, Loader2 } from "lucide-react";
+import { Image as ImageIcon, Search, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface MediaLibraryProps {
   brandId: string;
 }
 
-const typeFilters = [
-  { key: "all", label: "All", icon: Layers },
-  { key: "image", label: "Images", icon: Image },
-  { key: "video", label: "Videos", icon: FileVideo },
-] as const;
+type LibraryMediaGroup = EditableMediaGroup & {
+  tags?: string[];
+  variant_count: number;
+  status: string;
+  created_at: string;
+};
 
 export function MediaLibrary({ brandId }: MediaLibraryProps) {
-  const router = useRouter();
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "image" | "video">("all");
   const [page, setPage] = useState(1);
+  const [editingGroup, setEditingGroup] = useState<EditableMediaGroup | null>(null);
 
   const utils = trpc.useUtils();
-  const { data: stats } = trpc.media.getStats.useQuery({ brandId });
 
+  // Single pool — videos and images together (no type split).
   const { data: mediaData, isLoading, isFetching } = trpc.media.list.useQuery({
     brandId,
     search: search || undefined,
-    type: typeFilter,
+    type: "all",
     page,
     limit: 20,
   });
@@ -42,10 +42,51 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
     onSuccess: () => {
       toast.success("Media deleted");
       utils.media.list.invalidate();
-      utils.media.getStats.invalidate();
     },
     onError: (error) => toast.error(error.message),
   });
+
+  // Per-media publishing breakdown (Post/Reel × queued/processing/completed/failed),
+  // the data the old Queue page used — now shown inline on each media card.
+  const { data: jobGroupData } = trpc.jobs.listGroups.useQuery(
+    { brandId },
+    {
+      // Poll only while something is actually moving. The interval option is
+      // re-read on every render, so it stops on its own once nothing is queued
+      // or processing — a library of finished posts then makes no background
+      // requests at all, instead of one every five seconds forever.
+      refetchInterval: (query: any) => {
+        const groups = query?.state?.data?.groups ?? [];
+        const busy = groups.some(
+          (g: any) =>
+            (g.post?.queued ?? 0) + (g.post?.processing ?? 0) +
+              (g.reel?.queued ?? 0) + (g.reel?.processing ?? 0) >
+            0
+        );
+        return busy ? 5000 : false;
+      },
+    }
+  );
+  const jobStatsMap = new Map(
+    (jobGroupData?.groups ?? []).map((g: any) => [
+      g.id,
+      { post: g.post, reel: g.reel, hasPost: g.hasPost, hasReel: g.hasReel, totalJobs: g.totalJobs },
+    ])
+  );
+
+  const [retrying, setRetrying] = useState<{ groupId: string; category: "post" | "reel" | "all" } | null>(null);
+  const retryJobsMutation = trpc.jobs.retryGroupFailed.useMutation({
+    onSuccess: (res: any) => {
+      toast.success(`${res.retried} failed job${res.retried === 1 ? "" : "s"} re-queued`);
+      utils.jobs.listGroups.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+    onSettled: () => setRetrying(null),
+  });
+  function handleRetryJobs(groupId: string, category: "post" | "reel" | "all") {
+    setRetrying({ groupId, category });
+    retryJobsMutation.mutate({ groupId, category });
+  }
 
   function handleDelete(groupId: string) {
     if (confirm("Delete this media? Files will also be removed from Google Drive. This cannot be undone.")) {
@@ -58,13 +99,12 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
 
   return (
     <div className="space-y-6">
-      {/* Metric cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard label="Total Media" value={stats?.total ?? 0} />
-        <MetricCard label="Groups" value={stats?.groups ?? 0} />
-        <MetricCard label="Published" value={stats?.published ?? 0} />
-        <MetricCard label="Scheduled" value={stats?.scheduled ?? 0} />
-      </div>
+      {/* Inline uploader — replaces the old metric cards. Drop files here to add media. */}
+      <UploadForm
+        brandId={brandId}
+        embedded
+        onUploaded={() => utils.media.list.invalidate()}
+      />
 
       {/* Toolbar */}
       <div className="flex items-center gap-3 flex-wrap">
@@ -80,35 +120,6 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
             className="pl-9"
           />
         </div>
-
-        <div className="flex items-center bg-muted rounded-lg p-1">
-          {typeFilters.map((f) => {
-            const Icon = f.icon;
-            return (
-              <button
-                key={f.key}
-                onClick={() => {
-                  setTypeFilter(f.key);
-                  setPage(1);
-                }}
-                className={cn(
-                  "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
-                  typeFilter === f.key
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {f.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <Button onClick={() => router.push("/upload")}>
-          <Upload className="h-4 w-4 mr-2" />
-          Upload
-        </Button>
       </div>
 
       {/* Grid */}
@@ -119,13 +130,9 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
       ) : groups.length === 0 ? (
         <div className="flex items-center justify-center h-64 border-2 border-dashed rounded-lg">
           <div className="text-center text-muted-foreground">
-            <Image className="h-12 w-12 mx-auto mb-3 opacity-50" />
+            <ImageIcon className="h-12 w-12 mx-auto mb-3 opacity-50" />
             <p className="font-medium">No media yet</p>
-            <p className="text-sm mb-4">Upload your first media to get started</p>
-            <Button onClick={() => router.push("/upload")}>
-              <Upload className="h-4 w-4 mr-2" />
-              Upload
-            </Button>
+            <p className="text-sm">Drop files above to add your first media</p>
           </div>
         </div>
       ) : (
@@ -137,11 +144,19 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
             </div>
           )}
           <div className={cn(
-            "grid grid-cols-1 md:grid-cols-2 gap-4 transition-opacity",
+            "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 transition-opacity",
             isFetching && !isLoading ? "opacity-60" : "opacity-100"
           )}>
-            {groups.map((group: any) => (
-              <MediaGroupCard key={group.id} group={group} onDelete={handleDelete} />
+            {groups.map((group: LibraryMediaGroup) => (
+              <MediaGroupCard
+                key={group.id}
+                group={group}
+                onDelete={handleDelete}
+                onEdit={() => setEditingGroup(group)}
+                jobStats={jobStatsMap.get(group.id)}
+                onRetryJobs={handleRetryJobs}
+                retryingCategory={retrying}
+              />
             ))}
           </div>
 
@@ -171,17 +186,14 @@ export function MediaLibrary({ brandId }: MediaLibraryProps) {
           )}
         </>
       )}
-    </div>
-  );
-}
 
-function MetricCard({ label, value }: { label: string; value: number }) {
-  return (
-    <Card>
-      <CardContent className="pt-5">
-        <p className="text-2xl font-bold">{value}</p>
-        <p className="text-sm text-muted-foreground">{label}</p>
-      </CardContent>
-    </Card>
+      <MediaEditorPanel
+        group={editingGroup}
+        open={Boolean(editingGroup)}
+        onOpenChange={(open) => {
+          if (!open) setEditingGroup(null);
+        }}
+      />
+    </div>
   );
 }

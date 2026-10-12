@@ -1,0 +1,309 @@
+"use client";
+
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { CalendarDays, KeyRound, Mail, Plus, RefreshCw, Search, UserRound } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { trpc } from "@/lib/trpc/client";
+import { useBrand } from "@/lib/hooks/use-brand";
+
+type CreatorForm = {
+  firstName: string;
+  lastName: string;
+  email: string;
+  password: string;
+  day: string;
+  month: string;
+  year: string;
+  gender: string; // "1" female, "2" male, "3" custom
+};
+
+type CreatorReply = {
+  source?: string;
+  state?: "opening" | "filled" | "error";
+  message?: string;
+};
+type ImportedProfile = {
+  id: string;
+  district: string | null;
+  instaName: string;
+  email: string;
+  password: string;
+  status: "pending" | "done";
+  facebookStatus: "pending" | "done";
+  sourceRowNumber: number;
+};
+type NewProfile = { district: string; instaName: string; email: string; password: string };
+
+const months = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+const initialForm: CreatorForm = {
+  firstName: "", lastName: "", email: "", password: "", day: "26", month: "3", year: "2002", gender: "2",
+};
+
+// Facebook requires a first and last name. Profile names like "Badalta_Moradabad"
+// are split on separators; a single-word name reuses itself as the surname.
+function splitName(instaName: string): { firstName: string; lastName: string } {
+  const parts = instaName.replace(/[_.]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: instaName, lastName: instaName };
+  if (parts.length === 1) return { firstName: parts[0], lastName: parts[0] };
+  return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+}
+
+/**
+ * Hands a one-time, in-memory request to the locally installed Chrome extension,
+ * which opens Facebook's sign-up page and fills the visible fields. Credentials
+ * are sent only to the user-installed local extension for this explicit action.
+ */
+export function FacebookIdCreator() {
+  const [form, setForm] = useState<CreatorForm>(initialForm);
+  const [submitting, setSubmitting] = useState(false);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [profileSearch, setProfileSearch] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [newProfile, setNewProfile] = useState<NewProfile>({ district: "", instaName: "", email: "", password: "" });
+  const utils = trpc.useUtils();
+  const { activeBrandId } = useBrand();
+  const profilesQuery = trpc.instaProfileUsers.list.useQuery();
+  const statusMutation = trpc.instaProfileUsers.setFacebookStatus.useMutation({
+    onSuccess: () => utils.instaProfileUsers.list.invalidate(),
+    onError: (error) => toast.error(error.message),
+  });
+  const syncSheetMutation = trpc.instaProfileUsers.syncSheet.useMutation({
+    onSuccess: (result) => {
+      toast.success(`Google Sheet synced: ${result.updated} updated${result.appended ? `, ${result.appended} added` : ""}.`);
+      utils.instaProfileUsers.list.invalidate();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const profiles = (profilesQuery.data ?? []) as ImportedProfile[];
+  const matchingProfiles = useMemo(() => {
+    const query = profileSearch.trim();
+    if (!query) return profiles;
+    const expression = new RegExp(query
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/[\s_.-]+/g, "[\\s_.-]*"), "i");
+    return profiles.filter((profile) => expression.test(profile.instaName));
+  }, [profileSearch, profiles]);
+  const createMutation = trpc.instaProfileUsers.create.useMutation({
+    onSuccess: (profile) => {
+      setSelectedProfileId(profile.id);
+      const { firstName, lastName } = splitName(profile.instaName);
+      setForm((current) => ({ ...current, firstName, lastName, email: profile.email, password: profile.password }));
+      setNewProfile({ district: "", instaName: "", email: "", password: "" });
+      setAddOpen(false);
+      toast.success("Profile added as Pending");
+      utils.instaProfileUsers.list.invalidate();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  useEffect(() => {
+    function receive(event: MessageEvent<CreatorReply>) {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      if (event.data?.source !== "mediahub-facebook-id-creator") return;
+      const reply = event.data;
+      if (reply.state === "filled") {
+        setSubmitting(false);
+        toast.success("Facebook sign-up form filled. Review and submit it in the Facebook tab.");
+      } else if (reply.state === "error") {
+        setSubmitting(false);
+        toast.error(reply.message || "The Chrome extension could not complete that step.");
+      }
+    }
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, []);
+
+  function update<K extends keyof CreatorForm>(key: K, value: CreatorForm[K]) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function fillInChrome(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    window.postMessage({
+      source: "mediahub-facebook-id-creator",
+      action: "fill-signup",
+      payload: form,
+    }, window.location.origin);
+    window.setTimeout(() => setSubmitting((current) => {
+      if (current) toast.error("Chrome did not respond. Install and enable the MediaHub Facebook ID Creator extension, then try again.");
+      return false;
+    }), 18_000);
+  }
+
+  const complete = Boolean(form.firstName && form.lastName && form.email && form.password && form.day && form.month && form.year);
+
+  function selectProfile(id: string | null) {
+    if (!id) return;
+    setSelectedProfileId(id);
+    const profile = profiles.find((row) => row.id === id);
+    if (!profile) return;
+    const { firstName, lastName } = splitName(profile.instaName);
+    setForm((current) => ({ ...current, firstName, lastName, email: profile.email, password: profile.password }));
+  }
+
+  function searchProfile() {
+    const pendingMatches = matchingProfiles.filter((profile) => profile.facebookStatus === "pending");
+    if (!profileSearch.trim()) {
+      toast.error("Enter a name to search.");
+      return;
+    }
+    if (pendingMatches.length === 1) {
+      selectProfile(pendingMatches[0].id);
+      toast.success(`Selected ${pendingMatches[0].instaName}.`);
+      return;
+    }
+    if (pendingMatches.length === 0) {
+      toast.error("No pending profile matches that name.");
+      return;
+    }
+    toast.message(`${pendingMatches.length} pending profiles match. Refine the name or select one below.`);
+  }
+
+  function updateNewProfile<K extends keyof NewProfile>(key: K, value: NewProfile[K]) {
+    setNewProfile((current) => ({ ...current, [key]: value }));
+  }
+
+  function syncSheet() {
+    if (!activeBrandId) {
+      toast.error("Choose a brand with a connected Google Drive account before syncing.");
+      return;
+    }
+    syncSheetMutation.mutate({ brandId: activeBrandId });
+  }
+
+  return (
+    <div className="w-full space-y-5">
+      <div>
+        <h2 className="text-xl font-bold tracking-tight text-foreground">Facebook ID Creator</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">Uses the same profiles (name, email, password) as the Instagram ID Creator. Fill the details, then let the local Chrome extension open and fill Facebook&apos;s sign-up page.</p>
+      </div>
+
+      <Card>
+        <CardHeader className="gap-4 pb-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <CardTitle className="text-base">Imported profile rows ({profiles.length})</CardTitle>
+            <CardDescription>Password values remain masked. A Done row stays visible but cannot be selected for a new account.</CardDescription>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end">
+            <div className="w-full space-y-2 sm:w-96">
+              <Label htmlFor="fb-profile-search">Search name</Label>
+              <div className="flex gap-2">
+                <Input id="fb-profile-search" value={profileSearch} onChange={(event) => setProfileSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); searchProfile(); } }} placeholder="e.g. Badalta_Moradabad" disabled={profilesQuery.isLoading} />
+                <Button type="button" variant="outline" onClick={searchProfile} disabled={profilesQuery.isLoading}><Search className="mr-1.5 h-4 w-4" />Search</Button>
+              </div>
+            </div>
+            <Button type="button" variant="outline" onClick={syncSheet} disabled={syncSheetMutation.isPending || profilesQuery.isLoading}><RefreshCw className={syncSheetMutation.isPending ? "mr-1.5 h-4 w-4 animate-spin" : "mr-1.5 h-4 w-4"} />{syncSheetMutation.isPending ? "Syncing…" : "Sync to Google Sheet"}</Button>
+            <Button type="button" variant="outline" onClick={() => setAddOpen(true)}><Plus className="mr-1.5 h-4 w-4" />Add profile</Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="max-h-[580px] overflow-auto rounded-md border shadow-2xs">
+            <Table>
+              <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur shadow-xs">
+                <TableRow className="bg-muted/70 hover:bg-muted/70">
+                  <TableHead>Choose</TableHead>
+                  <TableHead>ID</TableHead>
+                  <TableHead>District</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Password</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {matchingProfiles.map((profile) => (
+                  <TableRow key={profile.id} data-state={profile.id === selectedProfileId ? "selected" : undefined}>
+                    <TableCell>
+                      {profile.facebookStatus === "done" ? (
+                        <span className="inline-flex h-8 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">Done</span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          className={profile.id === selectedProfileId ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-950/70"}
+                          variant={profile.id === selectedProfileId ? "default" : "outline"}
+                          onClick={() => selectProfile(profile.id)}
+                        >
+                          {profile.id === selectedProfileId ? "Selected" : "Select"}
+                        </Button>
+                      )}
+                    </TableCell>
+                    <TableCell>{profile.sourceRowNumber}</TableCell>
+                    <TableCell>{profile.district || "—"}</TableCell>
+                    <TableCell className="font-medium">{profile.instaName}</TableCell>
+                    <TableCell>{profile.email}</TableCell>
+                    <TableCell aria-label="Password protected">••••••••</TableCell>
+                    <TableCell>
+                      <Select
+                        value={profile.facebookStatus}
+                        onValueChange={(status) => {
+                          if (status === "pending" || status === "done") statusMutation.mutate({ id: profile.id, status });
+                        }}
+                        disabled={statusMutation.isPending}
+                      >
+                        <SelectTrigger className={profile.facebookStatus === "done"
+                          ? "h-8 w-28 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                          : "h-8 w-28 border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent><SelectItem value="pending">Pending</SelectItem><SelectItem value="done">Done</SelectItem></SelectContent>
+                      </Select>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add profile</DialogTitle>
+            <DialogDescription>The new profile starts as Pending. Its password is encrypted locally and only used after you select this row for the Chrome fill action.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2"><Label htmlFor="fb-new-district">District</Label><Input id="fb-new-district" value={newProfile.district} onChange={(event) => updateNewProfile("district", event.target.value)} /></div>
+            <div className="space-y-2"><Label htmlFor="fb-new-name">Name</Label><Input id="fb-new-name" value={newProfile.instaName} onChange={(event) => updateNewProfile("instaName", event.target.value)} required /></div>
+            <div className="space-y-2 sm:col-span-2"><Label htmlFor="fb-new-email">Email</Label><Input id="fb-new-email" type="email" value={newProfile.email} onChange={(event) => updateNewProfile("email", event.target.value)} required /></div>
+            <div className="space-y-2 sm:col-span-2"><Label htmlFor="fb-new-password">Password</Label><Input id="fb-new-password" type="password" value={newProfile.password} onChange={(event) => updateNewProfile("password", event.target.value)} required /></div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button type="button" onClick={() => createMutation.mutate(newProfile)} disabled={createMutation.isPending || !newProfile.instaName || !newProfile.email || !newProfile.password}>{createMutation.isPending ? "Adding…" : "Add profile"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <form onSubmit={fillInChrome} className="space-y-5">
+        <Card>
+          <CardContent className="grid gap-5 p-6 sm:grid-cols-2">
+            <div className="space-y-2"><Label htmlFor="fb-first">First name</Label><div className="relative"><UserRound className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><Input id="fb-first" className="pl-9" autoComplete="given-name" value={form.firstName} onChange={(event) => update("firstName", event.target.value)} required /></div></div>
+            <div className="space-y-2"><Label htmlFor="fb-last">Surname</Label><Input id="fb-last" autoComplete="family-name" value={form.lastName} onChange={(event) => update("lastName", event.target.value)} required /></div>
+            <div className="space-y-2 sm:col-span-2"><Label htmlFor="fb-email">Mobile number or email address</Label><div className="relative"><Mail className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><Input id="fb-email" className="pl-9" type="email" autoComplete="email" value={form.email} onChange={(event) => update("email", event.target.value)} required /></div></div>
+            <div className="space-y-2 sm:col-span-2"><Label htmlFor="fb-password">New password</Label><div className="relative"><KeyRound className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><Input id="fb-password" className="pl-9" type="password" autoComplete="new-password" value={form.password} onChange={(event) => update("password", event.target.value)} required /></div></div>
+            <div className="space-y-2 sm:col-span-2"><Label>Date of birth</Label><div className="grid grid-cols-3 gap-3"><Select value={form.day} onValueChange={(value) => update("day", value ?? "")} required><SelectTrigger aria-label="Day"><SelectValue placeholder="Day" /></SelectTrigger><SelectContent>{Array.from({ length: 31 }, (_, index) => String(index + 1)).map((day) => <SelectItem key={day} value={day}>{day}</SelectItem>)}</SelectContent></Select><Select value={form.month} onValueChange={(value) => update("month", value ?? "")} required><SelectTrigger aria-label="Month"><SelectValue placeholder="Month" /></SelectTrigger><SelectContent>{months.map((month, index) => <SelectItem key={month} value={String(index + 1)}>{month}</SelectItem>)}</SelectContent></Select><Select value={form.year} onValueChange={(value) => update("year", value ?? "")} required><SelectTrigger aria-label="Year"><SelectValue placeholder="Year" /></SelectTrigger><SelectContent>{Array.from({ length: 100 }, (_, index) => String(new Date().getFullYear() - 13 - index)).map((year) => <SelectItem key={year} value={year}>{year}</SelectItem>)}</SelectContent></Select></div></div>
+            <div className="space-y-2 sm:col-span-2"><Label>Gender</Label><Select value={form.gender} onValueChange={(value) => update("gender", value ?? "2")}><SelectTrigger aria-label="Gender"><SelectValue placeholder="Gender" /></SelectTrigger><SelectContent><SelectItem value="2">Male</SelectItem><SelectItem value="1">Female</SelectItem><SelectItem value="3">Custom</SelectItem></SelectContent></Select></div>
+          </CardContent>
+        </Card>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 p-4 text-sm">
+          <span className="flex items-center gap-2 text-muted-foreground"><CalendarDays className="h-4 w-4" /> One click opens Facebook and fills this selected profile. Review and submit the Facebook form yourself.</span>
+          <Button type="submit" disabled={!complete || submitting}>{submitting ? "Opening Facebook…" : "Open & fill Facebook"}</Button>
+        </div>
+      </form>
+    </div>
+  );
+}

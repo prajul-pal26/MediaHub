@@ -67,6 +67,25 @@ function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 60
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+// ─── Instagram publish pacing ───
+// Instagram enforces app-level rate limiting shared across every account under
+// the app. An image container is created almost instantly, so fanning one photo
+// out to many accounts at worker concurrency blasts requests far faster than the
+// limit allows and trips "Application request limit reached" — even though the
+// accounts are fine (reels to the same accounts succeed, because video
+// processing naturally spaces them out). Pace every IG container creation to a
+// safe minimum gap so bursts stay under the limit. An isolated post waits ~0ms
+// (its slot is already in the past); only concurrent/burst posts are spaced out.
+const IG_PUBLISH_MIN_GAP_MS = parseInt(process.env.IG_PUBLISH_MIN_GAP_MS || "30000", 10);
+let igNextSlotAt = 0;
+async function paceInstagram(): Promise<void> {
+  const now = Date.now();
+  const slot = Math.max(now, igNextSlotAt);
+  igNextSlotAt = slot + IG_PUBLISH_MIN_GAP_MS;
+  const waitMs = slot - now;
+  if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+}
+
 // ─── Drive Helpers ───
 
 async function getDriveClient(orgId: string, brandId: string) {
@@ -112,29 +131,83 @@ async function downloadFromDrive(asset: any, orgId: string, brandId: string): Pr
 
 // ─── Instagram Helpers ───
 
-async function createTempPublicUrl(driveFileId: string, oauth2: any): Promise<{ webContentLink: string; cleanup: () => Promise<void> }> {
+// When the same media file is published to many accounts at once (publish worker
+// concurrency > 1), every job would otherwise add and then revoke the Drive
+// "anyone" permission on the SAME file. One job's cleanup() could revoke public
+// access while another job's media is still being fetched by Instagram/Facebook,
+// which surfaces as "The image format is not supported". We reference-count the
+// temporary permission per file id: it is created once for the first concurrent
+// user (all users await that same creation) and revoked only after the last one
+// finishes.
+const tempPublicDriveRefs = new Map<string, { count: number; ready: Promise<void> }>();
+
+async function createTempPublicUrl(
+  driveFileId: string,
+  oauth2: any,
+  options: { forVideo?: boolean } = {}
+): Promise<{ webContentLink: string; cleanup: () => Promise<void> }> {
   const drive = google.drive({ version: "v3", auth: oauth2 });
 
-  // Make file publicly readable temporarily
-  await drive.permissions.create({
-    fileId: driveFileId,
-    requestBody: {
-      role: "reader",
-      type: "anyone",
-    },
-  });
+  // Make the file publicly readable, but only once across concurrent users.
+  let entry = tempPublicDriveRefs.get(driveFileId);
+  if (!entry) {
+    const ready = drive.permissions
+      .create({
+        fileId: driveFileId,
+        requestBody: { role: "reader", type: "anyone" },
+      })
+      .then(async () => {
+        // Wait for Drive to propagate the new public permission before the URL
+        // is fetched. Instagram's image container creation fetches the URL
+        // synchronously; if it races ahead of propagation it gets a non-image
+        // response, surfaced as "The image format is not supported" (and, after
+        // retries, the misleading "Application request limit reached").
+        await new Promise((r) => setTimeout(r, 3000));
+      })
+      .catch((err: any) => {
+        // An already-public file is fine (no propagation wait needed); any other
+        // failure means the file could not be shared — drop the entry so a later
+        // job/retry redoes it.
+        const status = err?.code ?? err?.response?.status;
+        if (status === 400 || status === 409) return undefined;
+        tempPublicDriveRefs.delete(driveFileId);
+        throw err;
+      });
+    entry = { count: 0, ready };
+    tempPublicDriveRefs.set(driveFileId, entry);
+  }
+  entry.count++;
 
-  // Use direct Google content URL (works without redirects for Instagram)
-  const directUrl = `https://lh3.googleusercontent.com/d/${driveFileId}`;
+  // Only hand out the URL once the file is actually public.
+  await entry.ready;
+
+  // Use drive.usercontent.google.com/download for both images and videos: it
+  // checks Drive permissions in real time (no CDN propagation lag) and returns
+  // the raw file bytes. lh3.googleusercontent.com (the old image URL) is a cached
+  // image CDN that lags behind fresh public-permission changes and intermittently
+  // fails Instagram's synchronous image fetch — the root cause of the photo
+  // publish failures. Reels already used this URL, which is why they never failed.
+  const encodedId = encodeURIComponent(driveFileId);
+  const directUrl = `https://drive.usercontent.google.com/download?id=${encodedId}&export=download`;
 
   return {
     webContentLink: directUrl,
     cleanup: async () => {
-      // Remove public access
+      const current = tempPublicDriveRefs.get(driveFileId);
+      if (current) {
+        current.count--;
+        if (current.count > 0) return; // other concurrent jobs still need it
+        tempPublicDriveRefs.delete(driveFileId);
+      }
+
+      // Last concurrent user — revoke public access.
       const perms = await drive.permissions.list({ fileId: driveFileId });
       const anyonePerm = perms.data.permissions?.find((p: any) => p.type === "anyone");
       if (anyonePerm?.id) {
-        await drive.permissions.delete({ fileId: driveFileId, permissionId: anyonePerm.id });
+        await drive.permissions.delete({ fileId: driveFileId, permissionId: anyonePerm.id }).catch((err: any) => {
+          const status = err?.code ?? err?.response?.status;
+          if (status !== 404) throw err;
+        });
       }
     },
   };
@@ -152,6 +225,16 @@ async function waitForIgContainer(containerId: string, accessToken: string, maxW
     await new Promise((r) => setTimeout(r, 3000));
   }
   throw new Error("Instagram media processing timed out");
+}
+
+// Build an Error that preserves Instagram's structured error so the worker can
+// tell a genuine transient rate limit (retryable) from a hard integrity/"Action
+// Block" (code 4, is_transient:false) that must NOT be retried — retrying an
+// action block only extends and deepens it.
+function igApiError(prefix: string, err: any): Error {
+  const e = new Error(`${prefix}: ${err?.message || JSON.stringify(err)}`);
+  (e as any).igError = err;
+  return e;
 }
 
 // ─── Platform Publishers ───
@@ -237,7 +320,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
   const isVideo = (asset.file_type || "").startsWith("video/");
 
   // Create temporary public URL on Google Drive for Instagram to fetch
-  const { webContentLink, cleanup } = await createTempPublicUrl(driveFileId, driveOAuth);
+  const { webContentLink, cleanup } = await createTempPublicUrl(driveFileId, driveOAuth, { forVideo: isVideo });
 
   try {
     if (action === "ig_carousel") {
@@ -251,9 +334,14 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
       const childContainerIds: string[] = [];
       for (const carouselAsset of (allAssets || [])) {
         const carouselDriveFileId = carouselAsset.processed_drive_file_id || carouselAsset.drive_file_id;
-        const { webContentLink: itemUrl, cleanup: itemCleanup } = await createTempPublicUrl(carouselDriveFileId, driveOAuth);
         const isItemVideo = (carouselAsset.file_type || "").startsWith("video/");
+        const { webContentLink: itemUrl, cleanup: itemCleanup } = await createTempPublicUrl(
+          carouselDriveFileId,
+          driveOAuth,
+          { forVideo: isItemVideo }
+        );
 
+        await paceInstagram();
         const containerRes = await fetchWithTimeout(
           `${igApiBase}/${igUserId}/media`,
           {
@@ -269,7 +357,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
           }
         );
         const containerData = await containerRes.json();
-        if (containerData.error) throw new Error(`Instagram carousel item error: ${containerData.error.message}`);
+        if (containerData.error) throw igApiError("Instagram carousel item error", containerData.error);
         childContainerIds.push(containerData.id);
 
         // For videos, wait until ready
@@ -294,7 +382,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         }
       );
       const carouselData = await carouselRes.json();
-      if (carouselData.error) throw new Error(`Instagram carousel error: ${carouselData.error.message}`);
+      if (carouselData.error) throw igApiError("Instagram carousel error", carouselData.error);
 
       // Publish carousel
       const publishRes = await fetchWithTimeout(
@@ -309,7 +397,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         }
       );
       const publishData = await publishRes.json();
-      if (publishData.error) throw new Error(`Instagram publish error: ${publishData.error.message}`);
+      if (publishData.error) throw igApiError("Instagram publish error", publishData.error);
 
       console.log(`[instagram] Carousel published! ID: ${publishData.id}`);
       return publishData.id;
@@ -332,7 +420,8 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         // For ig_post image, don't set media_type — Instagram defaults to image post
       }
 
-      // Create container
+      // Create container (paced to stay under Instagram's app-level rate limit)
+      await paceInstagram();
       const containerRes = await fetchWithTimeout(
         `${igApiBase}/${igUserId}/media`,
         {
@@ -342,7 +431,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         }
       );
       const containerData = await containerRes.json();
-      if (containerData.error) throw new Error(`Instagram container error: ${containerData.error.message}`);
+      if (containerData.error) throw igApiError("Instagram container error", containerData.error);
 
       // Wait for container to be ready (videos AND images)
       // Instagram needs processing time even for images — skipping this causes
@@ -362,7 +451,7 @@ async function publishToInstagram(asset: any, account: any, action: string, orgI
         }
       );
       const publishData = await publishRes.json();
-      if (publishData.error) throw new Error(`Instagram publish error: ${publishData.error.message}`);
+      if (publishData.error) throw igApiError("Instagram publish error", publishData.error);
 
       console.log(`[instagram] ${action} published! ID: ${publishData.id}`);
       return publishData.id;
@@ -594,7 +683,7 @@ async function publishToFacebook(asset: any, account: any, action: string, orgId
   const driveFileId = asset.processed_drive_file_id || asset.drive_file_id;
   const isVideo = (asset.file_type || "").startsWith("video/");
 
-  const { webContentLink, cleanup } = await createTempPublicUrl(driveFileId, driveOAuth);
+  const { webContentLink, cleanup } = await createTempPublicUrl(driveFileId, driveOAuth, { forVideo: isVideo });
 
   try {
     if (action === "fb_reel") {
@@ -1183,11 +1272,52 @@ const publishWorker = new Worker(
 
       console.log(`[publish] Job ${publishJobId} completed: ${platformPostId}`);
     } catch (error: any) {
-      console.error(`[publish] Job ${publishJobId} failed:`, error.message);
+      const msg = error?.message || String(error);
+      const ig = (error as any)?.igError;
+
+      // Instagram integrity / "Action Block" (code 4, is_transient:false, e.g.
+      // error_subcode 2207051). This is NOT a rate limit: it is a deliberate spam
+      // block that retrying only deepens and prolongs. It is typically triggered
+      // by posting the same media to many accounts in automated bursts. Fail the
+      // job clearly and DO NOT retry.
+      if (ig && ig.is_transient === false) {
+        const detail = ig.error_user_title || ig.message || msg;
+        console.error(`[publish] Job ${publishJobId} Instagram ACTION BLOCK (not retried): subcode=${ig.error_subcode} — ${detail}`);
+        await db().from("publish_jobs").update({
+          status: "failed",
+          error_message: `Instagram action block (spam protection, subcode ${ig.error_subcode ?? "?"}) — not retried. Posting the same media to many accounts in bursts triggers this; space posts far apart and vary the content.`,
+          attempt_count: (job.attemptsMade ?? 0) + 1,
+        }).eq("id", publishJobId);
+        return; // stop — do not hammer the block
+      }
+
+      // Genuinely transient platform rate limiting. Requeue this one job with a
+      // long, JITTERED delay so a fan-out drains gradually as the window recovers,
+      // rather than all jobs re-bursting at the same instant.
+      const isRateLimited = (ig ? ig.is_transient === true : false) ||
+        /rate limit|temporarily blocked|please wait a few minutes/i.test(msg);
+      const rlAttempt = (job.data?.rateLimitAttempts ?? 0) + 1;
+      const RL_MAX_REQUEUES = 8;
+      if (isRateLimited && rlAttempt <= RL_MAX_REQUEUES) {
+        const delayMs = 15 * 60 * 1000 + Math.floor(Math.random() * 20 * 60 * 1000); // 15–35 min
+        console.warn(`[publish] Job ${publishJobId} rate-limited; requeueing in ~${Math.round(delayMs / 60000)}min (rate-limit attempt ${rlAttempt}/${RL_MAX_REQUEUES})`);
+        await db().from("publish_jobs").update({
+          status: "queued",
+          error_message: `Rate-limited by platform; auto-retrying (attempt ${rlAttempt}/${RL_MAX_REQUEUES})`,
+        }).eq("id", publishJobId);
+        await publishQueue.add(
+          job.name,
+          { ...job.data, rateLimitAttempts: rlAttempt },
+          { delay: delayMs, attempts: 1, removeOnComplete: true, removeOnFail: true }
+        );
+        return; // swallow — this job's work is carried by the delayed requeue
+      }
+
+      console.error(`[publish] Job ${publishJobId} failed:`, msg);
 
       await db().from("publish_jobs").update({
         status: job.attemptsMade + 1 >= 3 ? "dead" : "failed",
-        error_message: error.message,
+        error_message: msg,
         attempt_count: job.attemptsMade + 1,
       }).eq("id", publishJobId);
 
@@ -1196,7 +1326,35 @@ const publishWorker = new Worker(
   },
   {
     connection: redis,
-    concurrency: 3,
+    // Throughput is max(IG_PUBLISH_MIN_GAP_MS, W/concurrency), where W is the
+    // real work time of one publish — measured at ~42s (container creation +
+    // Instagram-side video processing + publish). The two knobs are balanced
+    // when gap == W/concurrency; whichever is larger is the one that binds, and
+    // raising only the other buys nothing.
+    //   42000/21 = 2000ms, matching IG_PUBLISH_MIN_GAP_MS=2000  -> ~2.0s/job
+    // Keep them in step: if you change one, recompute the other from 42000/C.
+    // Measured progression: 32.8s (c3/g30s) -> 13.3s (c6/g10s) -> 3.5s (c12/g3s).
+    // BACKED OFF from 21 after a live run at concurrency 21 / gap 2000 produced
+    // 19 "Instagram media processing timed out" failures and, more seriously,
+    // one account checkpoint ("You cannot access the app till you log in").
+    // Instagram's own video processing — not our rate limit — is the ceiling:
+    // x-app-usage stayed at 0% throughout. 6/10000 is the setting that ran a
+    // full 76-account fan-out with 76/76 and zero errors.
+    // Throughput is max(IG_PUBLISH_MIN_GAP_MS, W/concurrency) where W is the
+    // real work time of one publish, measured at ~42s. At 12 slots that term is
+    // 42/12 = 3.5s, which sits BELOW the 5000ms gap — so the gap is what binds
+    // and the extra slots give headroom rather than speed. Lower the gap to go
+    // faster; raise concurrency only once the gap drops under ~3.5s.
+    // MAX practical setting. Throughput is max(gap, W/concurrency) with W (real
+    // work per publish) measured at ~42s, so 42/20 = 2.1s/job against a 1000ms
+    // gap -> concurrency is what binds, which is correct: the gap has no further
+    // effect below ~2.1s.
+    //
+    // Deliberately 20 and not higher: a live run at concurrency 21 produced 19
+    // "Instagram media processing timed out" failures, because many simultaneous
+    // video jobs slow INSTAGRAM's own processing, not ours. Past ~20 you lose
+    // more to timeouts than you gain in throughput.
+    concurrency: 20,
     settings: {
       backoffStrategy: (attemptsMade: number) => {
         return Math.min(1000 * Math.pow(2, attemptsMade), 30000); // 1s, 2s, 4s, 8s... max 30s
@@ -4693,39 +4851,40 @@ async function verifyStartup() {
     console.warn("  ⚠ FFmpeg not found — video processing limited");
   }
 
+  // Background work is deliberately opt-in. A running worker must not start
+  // polling every connected account simply because the dashboard is open.
+  // Manual queue actions are still available; setting this flag to "true"
+  // enables the periodic maintenance jobs below.
+  const automaticBackgroundJobsEnabled = process.env.ENABLE_AUTOMATIC_BACKGROUND_JOBS === "true";
+
   // Schedule cron jobs
   const analyticsQueue = new Queue("analytics-fetch", { connection: redis });
   const tokenQueue = new Queue("token-refresh", { connection: redis });
-
-  await analyticsQueue.add("fetch-all", {}, { repeat: { every: 6 * 60 * 60 * 1000 }, jobId: "analytics-cron" });
-  console.log("  ✓ Analytics cron (every 6 hours)");
-
-  await tokenQueue.add("refresh-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "token-refresh-cron" });
-  console.log("  ✓ Token refresh cron (daily)");
-
   const trendQueue = new Queue("trend-forecast", { connection: redis });
-  await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
-  console.log("  ✓ Trend forecast cron (weekly)");
-
-  // Comment sentiment analysis — daily
   const sentimentQueue = new Queue("comment-sentiment", { connection: redis });
-  await sentimentQueue.add("analyze-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "comment-sentiment-cron" });
-  console.log("  ✓ Comment sentiment cron (daily)");
-
-  // Competitor data fetch — daily
   const competitorQueue = new Queue("competitor-fetch", { connection: redis });
-  await competitorQueue.add("fetch-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "competitor-fetch-cron" });
-  console.log("  ✓ Competitor fetch cron (daily)");
-
-  // Comment sync — every 2 hours
   const commentSyncQueue = new Queue("comment-sync", { connection: redis });
-  await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
-  console.log("  ✓ Comment sync cron (every 2 hours)");
-
-  // Comment reply processing — every 30 seconds
   const commentReplyQueue = new Queue("comment-reply", { connection: redis });
-  await commentReplyQueue.add("process-pending", {}, { repeat: { every: 5 * 60 * 1000 }, jobId: "comment-reply-cron" });
-  console.log("  ✓ Comment reply processing (every 30s)");
+
+  if (automaticBackgroundJobsEnabled) {
+    await analyticsQueue.add("fetch-all", {}, { repeat: { every: 6 * 60 * 60 * 1000 }, jobId: "analytics-cron" });
+    await tokenQueue.add("refresh-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "token-refresh-cron" });
+    await trendQueue.add("forecast-all", {}, { repeat: { every: 7 * 24 * 60 * 60 * 1000 }, jobId: "trend-forecast-cron" });
+    await sentimentQueue.add("analyze-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "comment-sentiment-cron" });
+    await competitorQueue.add("fetch-all", {}, { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "competitor-fetch-cron" });
+    await commentSyncQueue.add("sync-all", {}, { repeat: { every: 2 * 60 * 60 * 1000 }, jobId: "comment-sync-cron" });
+    await commentReplyQueue.add("process-pending", {}, { repeat: { every: 5 * 60 * 1000 }, jobId: "comment-reply-cron" });
+    console.log("  ✓ Automatic background jobs enabled");
+  } else {
+    await analyticsQueue.removeRepeatable("fetch-all", { every: 6 * 60 * 60 * 1000 }, "analytics-cron");
+    await tokenQueue.removeRepeatable("refresh-all", { every: 24 * 60 * 60 * 1000 }, "token-refresh-cron");
+    await trendQueue.removeRepeatable("forecast-all", { every: 7 * 24 * 60 * 60 * 1000 }, "trend-forecast-cron");
+    await sentimentQueue.removeRepeatable("analyze-all", { every: 24 * 60 * 60 * 1000 }, "comment-sentiment-cron");
+    await competitorQueue.removeRepeatable("fetch-all", { every: 24 * 60 * 60 * 1000 }, "competitor-fetch-cron");
+    await commentSyncQueue.removeRepeatable("sync-all", { every: 2 * 60 * 60 * 1000 }, "comment-sync-cron");
+    await commentReplyQueue.removeRepeatable("process-pending", { every: 5 * 60 * 1000 }, "comment-reply-cron");
+    console.log("  • Automatic background jobs disabled; use manual actions when needed");
+  }
 }
 
 // ─── Instagram comment harvest ───
@@ -4784,7 +4943,11 @@ const instaCommentWorker = new Worker(
       "./src/server/services/instagram/comments"
     );
 
-    const posts: { mediaId: string; shortcode: string; commentCount: number }[] = run.posts ?? [];
+    const allPosts: { mediaId: string; shortcode: string; commentCount: number }[] = run.posts ?? [];
+    const retryIds = Array.isArray(run.retry_media_ids)
+      ? new Set(run.retry_media_ids.filter((id: unknown): id is string => typeof id === "string"))
+      : null;
+    const posts = retryIds ? allPosts.filter((post) => retryIds.has(post.mediaId)) : allPosts;
     if (!posts.length) return fail("Run has no posts");
 
     const startedAt = Date.now();
@@ -4793,8 +4956,28 @@ const instaCommentWorker = new Worker(
       .update({ status: "running", started_at: new Date().toISOString() })
       .eq("id", runId);
 
-    const shortcodeFor = new Map(posts.map((p) => [p.mediaId, p.shortcode]));
-    const perPost: Record<string, number> = {};
+    const shortcodeFor = new Map(allPosts.map((p) => [p.mediaId, p.shortcode]));
+    type PostProgress = {
+      status: "pending" | "running" | "complete" | "partial" | "failed";
+      reportedCount: number | null;
+      scrapedCount: number;
+      topLevelCount: number;
+      replyCount: number;
+      pagesFetched: number;
+      requestCount: number;
+      error?: string;
+    };
+    const perPost: Record<string, PostProgress> = Object.fromEntries(
+      Object.entries(run.progress?.perPost ?? {}).map(([mediaId, value]: [string, any]) => {
+        // Older runs stored only a numeric count. Preserve it rather than
+        // making a retry erase visible progress when upgrading this worker.
+        if (typeof value === "number") {
+          const expected = allPosts.find((post) => post.mediaId === mediaId)?.commentCount ?? null;
+          return [mediaId, { status: "partial", reportedCount: expected, scrapedCount: value, topLevelCount: value, replyCount: 0, pagesFetched: 0, requestCount: 0 }];
+        }
+        return [mediaId, value as PostProgress];
+      }),
+    );
     const governor = new CommentRateGovernor();
     const abort = new AbortController();
 
@@ -4803,7 +4986,7 @@ const instaCommentWorker = new Worker(
     const flush = async (force = false) => {
       if (!force && Date.now() - lastFlush < 3000) return;
       lastFlush = Date.now();
-      const total = Object.values(perPost).reduce((a, b) => a + b, 0);
+      const total = Object.values(perPost).reduce((sum, post) => sum + post.scrapedCount, 0);
       const secs = (Date.now() - startedAt) / 1000;
       await db()
         .from("insta_comment_runs")
@@ -4825,61 +5008,126 @@ const instaCommentWorker = new Worker(
       }
     }, 5000);
 
+    const persistResult = async (r: { mediaId: string; comments: any[]; reportedTotal: number | null; pagesFetched: number; requestCount: number; truncated: boolean; error?: string }) => {
+      const reportedCount = r.reportedTotal ?? allPosts.find((post) => post.mediaId === r.mediaId)?.commentCount ?? null;
+
+      // Checkpoint each completed post immediately. A worker restart, manual
+      // cancel, or rate-limit after this point never loses its comments.
+      const rows = r.comments.map((c) => ({
+        run_id: runId,
+        org_id: run.org_id,
+        post_media_id: r.mediaId,
+        post_shortcode: shortcodeFor.get(r.mediaId) ?? null,
+        comment_id: c.id,
+        comment_text: c.text,
+        comment_created_at: c.createdAt,
+        comment_likes: c.likeCount,
+        depth: c.depth,
+        parent_comment_id: c.parentId,
+        reply_count: c.replyCount,
+        commenter_username: c.username,
+        commenter_full_name: c.fullName,
+        commenter_user_id: c.userId,
+        commenter_verified: c.isVerified,
+      }));
+      for (let i = 0; i < rows.length; i += 1000) {
+        const { error } = await db().from("insta_comments").upsert(rows.slice(i, i + 1000), { onConflict: "run_id,comment_id", ignoreDuplicates: true });
+        if (error) throw new Error(`Could not checkpoint Instagram comments: ${error.message}`);
+      }
+
+      // Keep a local, merged media workspace in addition to the normalized
+      // audit rows. This is the source for UI deltas and retries, so a partial
+      // later pass never makes an earlier complete collection disappear.
+      const { data: existingMedia, error: existingError } = await db()
+        .from("insta_comment_media")
+        .select("comments_json")
+        .eq("org_id", run.org_id)
+        .eq("target_username", run.target_username)
+        .eq("media_id", r.mediaId)
+        .maybeSingle();
+      if (existingError) throw new Error(`Could not read Instagram comment workspace: ${existingError.message}`);
+      const commentsById = new Map<string, any>();
+      for (const comment of Array.isArray(existingMedia?.comments_json) ? existingMedia.comments_json : []) {
+        if (comment?.id != null) commentsById.set(String(comment.id), comment);
+      }
+      for (const comment of r.comments) if (comment?.id != null) commentsById.set(String(comment.id), comment);
+      const mergedComments = [...commentsById.values()];
+      const topLevelCount = mergedComments.filter((comment) => comment.depth === 0).length;
+      const replyCount = mergedComments.length - topLevelCount;
+      const status: PostProgress["status"] = r.error ? "failed" : r.truncated || (reportedCount != null && mergedComments.length < reportedCount) ? "partial" : "complete";
+      perPost[r.mediaId] = {
+        status,
+        reportedCount,
+        scrapedCount: mergedComments.length,
+        topLevelCount,
+        replyCount,
+        pagesFetched: r.pagesFetched,
+        requestCount: r.requestCount,
+        ...(r.error ? { error: r.error } : {}),
+      };
+      const post = allPosts.find((entry) => entry.mediaId === r.mediaId);
+      const { error: workspaceError } = await db().from("insta_comment_media").upsert({
+        org_id: run.org_id,
+        target_username: run.target_username,
+        media_id: r.mediaId,
+        shortcode: post?.shortcode ?? null,
+        media_url: (post as any)?.url ?? null,
+        media_kind: (post as any)?.kind ?? null,
+        likes_count: Number.isFinite((post as any)?.likes) ? (post as any).likes : null,
+        comments_count_reported: reportedCount,
+        comments_scraped_count: mergedComments.length,
+        comments_top_level_count: topLevelCount,
+        comments_reply_count: replyCount,
+        comments_status: status,
+        comments_stop_reason: r.truncated ? "pagination_incomplete" : null,
+        comments_error: r.error ?? null,
+        comments_json: mergedComments,
+        last_run_id: runId,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "org_id,target_username,media_id" });
+      if (workspaceError) throw new Error(`Could not save Instagram comment workspace: ${workspaceError.message}`);
+      await flush(true);
+    };
+
     try {
-      const { results, totalComments, throttleCount, elapsedMs } = await harvestManyPosts(
+      const { results, totalComments: harvestedComments, throttleCount, elapsedMs } = await harvestManyPosts(
         posts.map((p) => p.mediaId),
         session,
         {
           concurrency: run.concurrency ?? 5,
+          maxPerPost: run.comment_limit > 0 ? run.comment_limit : Infinity,
           includeReplies: Boolean(run.include_replies),
           governor,
           signal: abort.signal,
-          onProgress: ({ mediaId, fetched }) => {
-            perPost[mediaId] = fetched;
+          onProgress: ({ mediaId, fetched, reportedTotal }) => {
+            const previous = perPost[mediaId];
+            perPost[mediaId] = {
+              status: "running",
+              reportedCount: reportedTotal ?? previous?.reportedCount ?? allPosts.find((post) => post.mediaId === mediaId)?.commentCount ?? null,
+              scrapedCount: fetched,
+              topLevelCount: previous?.topLevelCount ?? fetched,
+              replyCount: previous?.replyCount ?? 0,
+              pagesFetched: previous?.pagesFetched ?? 0,
+              requestCount: previous?.requestCount ?? 0,
+            };
             void flush();
           },
+          onResult: persistResult,
         },
       );
 
-      // Insert in chunks; a single post can carry tens of thousands of rows.
-      let inserted = 0;
-      for (const r of results) {
-        const rows = r.comments.map((c) => ({
-          run_id: runId,
-          org_id: run.org_id,
-          post_media_id: r.mediaId,
-          post_shortcode: shortcodeFor.get(r.mediaId) ?? null,
-          comment_id: c.id,
-          comment_text: c.text,
-          comment_created_at: c.createdAt,
-          comment_likes: c.likeCount,
-          depth: c.depth,
-          parent_comment_id: c.parentId,
-          reply_count: c.replyCount,
-          commenter_username: c.username,
-          commenter_full_name: c.fullName,
-          commenter_user_id: c.userId,
-          commenter_verified: c.isVerified,
-        }));
-        for (let i = 0; i < rows.length; i += 1000) {
-          const chunk = rows.slice(i, i + 1000);
-          const { error } = await db()
-            .from("insta_comments")
-            .upsert(chunk, { onConflict: "run_id,comment_id", ignoreDuplicates: true });
-          if (error) console.error(`[insta-comment-harvest] insert error: ${error.message}`);
-          else inserted += chunk.length;
-        }
-      }
-
-      const expected = run.expected_comments || posts.reduce((a, p) => a + p.commentCount, 0);
+      const expected = run.expected_comments || allPosts.reduce((a, p) => a + p.commentCount, 0);
       const cancelled = abort.signal.aborted;
       const requestCount = results.reduce((a, r) => a + r.requestCount, 0);
       const secs = elapsedMs / 1000;
+      const { count: storedComments } = await db().from("insta_comments").select("id", { count: "exact", head: true }).eq("run_id", runId);
+      const totalComments = storedComments ?? harvestedComments;
+      const hasGap = Object.values(perPost).some((post) => post.status !== "complete" || (post.reportedCount != null && post.scrapedCount < post.reportedCount));
 
       await db()
         .from("insta_comment_runs")
         .update({
-          status: cancelled ? "cancelled" : totalComments >= expected * 0.9 ? "completed" : "partial",
+          status: cancelled ? "cancelled" : hasGap ? "partial" : "completed",
           total_comments: totalComments,
           coverage_pct: expected > 0 ? Math.round((totalComments / expected) * 1000) / 10 : null,
           request_count: requestCount,
@@ -4888,13 +5136,46 @@ const instaCommentWorker = new Worker(
           current_pace_ms: governor.current,
           duration_ms: elapsedMs,
           progress: { perPost, updatedAt: new Date().toISOString() },
+          retry_media_ids: null,
           completed_at: new Date().toISOString(),
           error: results.find((r) => r.error)?.error ?? null,
         })
         .eq("id", runId);
 
+      // Drive export is deliberately after the durable database checkpoint.
+      // A Drive quota/auth failure never turns a completed collection into a
+      // failed scrape.  Each profile is merged into one managed Google Sheet.
+      if (run.drive_brand_id) {
+        try {
+          const { syncInstagramProfileSheet } = await import("./src/server/services/instagram/drive-export");
+          const saved = await syncInstagramProfileSheet({
+            org_id: run.org_id,
+            role: "admin",
+            brand_id: run.drive_brand_id,
+            assigned_brands: [run.drive_brand_id],
+          }, { brandId: run.drive_brand_id, username: run.target_username });
+          await db().from("insta_comment_media").update({
+            drive_sheet_id: saved.id,
+            drive_sheet_url: saved.url,
+            drive_synced_at: new Date().toISOString(),
+          }).eq("org_id", run.org_id).eq("target_username", run.target_username);
+          await db().from("insta_comment_runs").update({
+            drive_export_status: "complete",
+            drive_export_error: null,
+            drive_exported_at: new Date().toISOString(),
+          }).eq("id", runId);
+        } catch (exportError: any) {
+          const message = exportError?.message ?? "Instagram Drive export failed";
+          await db().from("insta_comment_runs").update({
+            drive_export_status: "failed",
+            drive_export_error: message,
+          }).eq("id", runId);
+          console.error(`[insta-comment-harvest] ${runId} Drive export failed: ${message}`);
+        }
+      }
+
       console.log(
-        `[insta-comment-harvest] ${runId} done: ${totalComments} comments (${inserted} stored) in ${(secs / 60).toFixed(1)}min, ${throttleCount} throttles`,
+        `[insta-comment-harvest] ${runId} done: ${totalComments} stored comments in ${(secs / 60).toFixed(1)}min, ${throttleCount} throttles`,
       );
     } catch (err: any) {
       await fail(err?.message ?? "harvest crashed");
@@ -4910,6 +5191,1743 @@ instaCommentWorker.on("failed", (job, err) => {
   console.error(`[insta-comment-harvest] job ${job?.id} failed:`, err?.message);
 });
 
+// ─── Editor Render Worker ───
+//
+// Renders a media_edits document to a flat file and stores it in the brand's
+// Drive "processed" folder.  Images go through sharp in-process; video goes
+// through ffmpeg, file -> file on the render-tmp volume (see renderVideoEdit).
+//
+// The job payload is ID-ONLY ({ editId }).  Redis runs with
+// --maxmemory-policy noeviction, so a document (or a base64 overlay) in the job
+// body would push it towards refusing writes; re-reading the row is also the
+// only way a retry picks up the latest document.
+//
+// Three facts about sharp 0.34.5 were verified empirically in this image and the
+// pipeline below depends on all of them:
+//
+//  1. `recomb` is applied BEFORE `linear`, and the intermediate is kept in float
+//     (clamping happens once, on the final cast to uchar).  So `.recomb(M)` plus
+//     `.linear([1,1,1], b)` computes exactly `M·in + b` — which is what lets a
+//     whole CSS filter chain collapse into one matrix and one offset.
+//  2. `composite` is applied BEFORE the colour operations.  A single pipeline
+//     would therefore tint the overlay as well, but the browser preview filters
+//     the base image only.  Hence two passes: base+effects to raw pixels, then
+//     composite and encode.
+//  3. `rotate()` with no argument applies EXIF orientation.  sharp does not do
+//     this implicitly but every browser does, so the crop rectangle in the
+//     document is expressed against the ORIENTED image.  Skipping it renders
+//     phone photos sideways and crops the wrong region.
+
+type ColourXform = { m: number[][]; off: number[] };
+
+const IDENTITY_XFORM: ColourXform = { m: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], off: [0, 0, 0] };
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
+
+function matMul3(a: number[][], b: number[][]): number[][] {
+  const out: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) sum += a[i][k] * b[k][j];
+      out[i][j] = sum;
+    }
+  }
+  return out;
+}
+
+function matVec3(a: number[][], v: number[]): number[] {
+  return [0, 1, 2].map((i) => a[i][0] * v[0] + a[i][1] * v[1] + a[i][2] * v[2]);
+}
+
+/** Apply `next` after `prev`: next.m·(prev.m·in + prev.off) + next.off. */
+function composeXform(prev: ColourXform, next: ColourXform): ColourXform {
+  return {
+    m: matMul3(next.m, prev.m),
+    off: matVec3(next.m, prev.off).map((v, i) => v + next.off[i]),
+  };
+}
+
+function scalarXform(slope: number, intercept: number): ColourXform {
+  return {
+    m: [[slope, 0, 0], [0, slope, 0], [0, 0, slope]],
+    off: [intercept, intercept, intercept],
+  };
+}
+
+/** Filter Effects `saturate(s)`.  grayscale(a) is the same matrix at s = 1 - a. */
+function saturateMatrix(s: number): number[][] {
+  return [
+    [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+    [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+    [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+  ];
+}
+
+/** Filter Effects `sepia(amount)`, k = 1 - amount. */
+function sepiaMatrix(amount: number): number[][] {
+  const k = 1 - clamp01(amount);
+  return [
+    [0.393 + 0.607 * k, 0.769 - 0.769 * k, 0.189 - 0.189 * k],
+    [0.349 - 0.349 * k, 0.686 + 0.314 * k, 0.168 - 0.168 * k],
+    [0.272 - 0.272 * k, 0.534 - 0.534 * k, 0.131 + 0.869 * k],
+  ];
+}
+
+/**
+ * Collapse the document's effect list into one colour transform plus one blur
+ * sigma.
+ *
+ * Every supported effect is an exact affine operation on sRGB channel values,
+ * which is the whole reason the document only allows these six — `modulate()`
+ * works in LCh and `ffmpeg eq` is an additive YUV offset, so neither reproduces
+ * the CSS preview.
+ *
+ * brightness(v) -> out = in·v                (CSS: linear multiply)
+ * contrast(v)   -> out = in·v + 127.5·(1-v)  (CSS: pivot around mid-grey)
+ * saturate/grayscale/sepia -> 3x3 matrices from the Filter Effects spec
+ *
+ * Blur is a normalised convolution, so it commutes with any affine colour
+ * transform and can be hoisted out of the chain; two Gaussians compose in
+ * quadrature, not by addition.
+ *
+ * One known divergence: CSS clamps between each filter function while this
+ * clamps once at the end.  It only shows on chains that overshoot and come back.
+ */
+function buildEffectChain(effects: Array<{ type: string; value: number }>): {
+  colour: ColourXform;
+  blurSigma: number;
+} {
+  let colour = IDENTITY_XFORM;
+  let blurVariance = 0;
+
+  for (const effect of effects) {
+    const value = Number.isFinite(effect.value) ? effect.value : 1;
+    switch (effect.type) {
+      case "brightness":
+        colour = composeXform(colour, scalarXform(Math.max(0, value), 0));
+        break;
+      case "contrast": {
+        const v = Math.max(0, value);
+        colour = composeXform(colour, scalarXform(v, 127.5 * (1 - v)));
+        break;
+      }
+      case "saturation":
+        colour = composeXform(colour, { m: saturateMatrix(Math.max(0, value)), off: [0, 0, 0] });
+        break;
+      case "grayscale":
+        colour = composeXform(colour, { m: saturateMatrix(1 - clamp01(value)), off: [0, 0, 0] });
+        break;
+      case "sepia":
+        colour = composeXform(colour, { m: sepiaMatrix(value), off: [0, 0, 0] });
+        break;
+      case "blur":
+        if (value > 0) blurVariance += value * value;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return { colour, blurSigma: blurVariance > 0 ? Math.sqrt(blurVariance) : 0 };
+}
+
+function isIdentityMatrix(m: number[][]): boolean {
+  const identity = IDENTITY_XFORM.m;
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      if (Math.abs(m[i][j] - identity[i][j]) > 1e-6) return false;
+    }
+  }
+  return true;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+// Geometry for the image path lives in src/lib/editor/sharp-plan.ts — a pure
+// module with its own unit tests (scripts/editor/sharp-plan.test.ts), the same
+// shape as ffmpeg-plan.ts for the video path. It is imported dynamically at
+// render time like the other @/-resolved modules this worker reaches for.
+type BaseTransform = import("./src/lib/editor/sharp-plan").BaseTransform;
+
+async function setRenderState(editId: string, patch: Record<string, unknown>): Promise<void> {
+  // No updated_at trigger exists on media_edits, so every write sets it.
+  await db()
+    .from("media_edits")
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq("id", editId);
+}
+
+// ─── Editor render: shared plumbing ───
+
+const MIME_EXTENSIONS: Record<string, string> = {
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+  "video/x-matroska": ".mkv",
+  "video/x-msvideo": ".avi",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "audio/mpeg": ".mp3",
+  "audio/mp3": ".mp3",
+  "audio/mp4": ".m4a",
+  "audio/x-m4a": ".m4a",
+  "audio/aac": ".aac",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "audio/ogg": ".ogg",
+  "audio/webm": ".weba",
+  "audio/flac": ".flac",
+};
+
+/**
+ * A temp-file extension for a Drive download.
+ *
+ * ffmpeg content-probes rather than trusting the name, so this is a hint only —
+ * but a few demuxers (and every "what is this file" debugging session) are
+ * easier when the scratch file is named plausibly.
+ */
+function tmpExtension(
+  fileName: string | null | undefined,
+  mimeType: string | null | undefined,
+  fallback: string
+): string {
+  const normalized = String(mimeType ?? "").toLowerCase().split(";")[0].trim();
+  if (normalized && MIME_EXTENSIONS[normalized]) return MIME_EXTENSIONS[normalized];
+  const match = /\.([A-Za-z0-9]{1,5})$/.exec(String(fileName ?? ""));
+  if (match) return `.${match[1].toLowerCase()}`;
+  return fallback;
+}
+
+/** The one Drive original a render reads from, plus the tenancy it belongs to. */
+type RenderSource = {
+  driveFileId: string;
+  fileName: string;
+  fileType: string;
+  brandId: string;
+  orgId: string;
+};
+
+/**
+ * Resolve the source original for an edit — the single place both the image and
+ * the video path get their input, so the two cannot drift.
+ *
+ * Order matters, and the two cases are genuinely different shapes:
+ *
+ *  1. `source_drive_file_id` (migration 00042, the normal case now): the Editor
+ *     sources its OWN media, so the draft carries a freshly uploaded original in
+ *     the brand's Originals folder with NO `media_assets` row at all. That is
+ *     expected, not a missing join — only `transferToLibrary` ever creates an
+ *     asset row. The brand is the edit's own `brand_id`, and the org comes from
+ *     `brands.org_id`.
+ *  2. `source_asset_id` (pre-00042 drafts): a Media Library asset, reached
+ *     through `media_groups` so the asset's brand can be compared with the
+ *     edit's.
+ */
+async function resolveRenderSource(edit: any): Promise<RenderSource> {
+  const brandId: string | undefined = edit.brand_id;
+  if (!brandId) throw new Error("This draft has no brand");
+
+  // Needed by every path: the Drive client is keyed on (brand, org) and for an
+  // Editor-owned source `brands.org_id` is the only place the org lives.
+  const { data: brand } = await db()
+    .from("brands")
+    .select("id, org_id")
+    .eq("id", brandId)
+    .single();
+  if (!brand?.org_id) throw new Error("Brand not found for this edit");
+  const orgId: string = brand.org_id;
+
+  if (edit.source_drive_file_id) {
+    return {
+      driveFileId: edit.source_drive_file_id,
+      fileName: edit.source_file_name || "source",
+      fileType: edit.source_file_type || "application/octet-stream",
+      brandId,
+      orgId,
+    };
+  }
+
+  if (edit.source_asset_id) {
+    const { data: asset } = await db()
+      .from("media_assets")
+      .select("id, drive_file_id, file_name, file_type, group:media_groups(id, brand_id)")
+      .eq("id", edit.source_asset_id)
+      .single();
+    if (!asset) throw new Error("Source asset not found");
+    if (!asset.drive_file_id) throw new Error("Source asset has no Drive file");
+
+    const assetBrandId: string | undefined = (asset as any).group?.brand_id;
+    if (!assetBrandId || assetBrandId !== brandId) {
+      throw new Error("Source asset does not belong to this edit's brand");
+    }
+
+    // Only drive_file_id is carried out of the asset row on purpose:
+    // downloadFromDrive prefers processed_drive_file_id, and the editor must
+    // always start from the ORIGINAL rather than from a previously processed
+    // derivative.
+    return {
+      driveFileId: asset.drive_file_id,
+      fileName: asset.file_name || "source",
+      fileType: asset.file_type || "application/octet-stream",
+      brandId,
+      orgId,
+    };
+  }
+
+  throw new Error(
+    "This draft has no source: neither source_drive_file_id nor source_asset_id is set"
+  );
+}
+
+/**
+ * Resolve `doc.audio.trackId` to an audio_tracks row.
+ *
+ * The track id arrives inside a client-supplied document, so the brand check is
+ * a real authorization boundary (this worker uses the service role and bypasses
+ * RLS), not a sanity check.
+ */
+async function resolveAudioTrack(
+  edit: any,
+  trackId: string | null
+): Promise<{ id: string; drive_file_id: string; name: string | null; mime_type: string | null } | null> {
+  if (!trackId) return null;
+
+  const { data: track } = await db()
+    .from("audio_tracks")
+    .select("id, brand_id, drive_file_id, name, mime_type")
+    .eq("id", trackId)
+    .single();
+  if (!track) throw new Error("Audio track not found");
+  if (track.brand_id !== edit.brand_id) {
+    throw new Error("Audio track does not belong to this edit's brand");
+  }
+  if (!track.drive_file_id) throw new Error("Audio track has no Drive file");
+
+  return {
+    id: track.id,
+    drive_file_id: track.drive_file_id,
+    name: track.name ?? null,
+    mime_type: track.mime_type ?? null,
+  };
+}
+
+/** No new bytes on disk for this long means the Drive stream is wedged, not slow. */
+const DRIVE_STALL_MS = 120_000;
+
+/** How often the stall watchdog looks at the growing file. */
+const DRIVE_STALL_POLL_MS = 5_000;
+
+/**
+ * Stream a Drive file straight to `destPath`.
+ *
+ * Deliberately NOT the Buffer-returning helpers (`downloadFromDrive` above, or
+ * the service's `downloadFile`): a video render has a source, an overlay, an
+ * audio bed and an output alive at once, the container is capped at 2 GB with a
+ * 1536 MB heap, and an OOM here kills all 12 workers in this process — including
+ * a publish job that has created an Instagram container but not yet recorded
+ * platform_post_id, which then re-posts on retry across every account.
+ *
+ * The client is fetched per call because `getAuthenticatedDrive` re-checks the
+ * token expiry and refreshes through drive_connections; a render easily outlives
+ * an access token.
+ *
+ * Progress is measured by stat()ing the destination rather than by listening for
+ * 'data' on the response: attaching a data listener switches the stream to
+ * flowing mode before pipeline() attaches its consumer, which silently drops the
+ * leading chunks.
+ */
+async function downloadDriveFileToDisk(
+  driveFileId: string,
+  brandId: string,
+  orgId: string,
+  destPath: string
+): Promise<number> {
+  const driveSvc = await import("./src/server/services/drive/client");
+  const drive = await driveSvc.getAuthenticatedDrive(brandId, orgId);
+
+  const res = await drive.files.get({ fileId: driveFileId, alt: "media" }, { responseType: "stream" });
+  const body = res.data as unknown as NodeJS.ReadableStream & {
+    destroy: (error?: Error) => void;
+  };
+
+  const fs = await import("fs");
+  const fsp = await import("fs/promises");
+  const { pipeline } = await import("stream/promises");
+
+  let lastSize = -1;
+  let lastGrowthAt = Date.now();
+  const watchdog = setInterval(() => {
+    void fsp
+      .stat(destPath)
+      .then((info) => {
+        if (info.size > lastSize) {
+          lastSize = info.size;
+          lastGrowthAt = Date.now();
+        } else if (Date.now() - lastGrowthAt > DRIVE_STALL_MS) {
+          body.destroy(new Error(`Drive download stalled at ${info.size} bytes`));
+        }
+      })
+      .catch(() => {});
+  }, DRIVE_STALL_POLL_MS);
+
+  try {
+    await pipeline(body, fs.createWriteStream(destPath));
+  } finally {
+    clearInterval(watchdog);
+  }
+
+  const info = await fsp.stat(destPath);
+  if (!info.size) throw new Error(`Drive file ${driveFileId} downloaded as 0 bytes`);
+  return info.size;
+}
+
+/**
+ * Every ffmpeg/ffprobe child currently running, so a SIGTERM can kill them
+ * before `renderWorker.close()` sits waiting on a render that would otherwise
+ * hold shutdown open until the container is SIGKILLed — which would skip the
+ * temp-file cleanup entirely.
+ */
+const activeRenderChildren = new Set<any>();
+
+function killActiveRenderChildren(): void {
+  for (const child of activeRenderChildren) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/** `ffprobe -show_streams -show_format` as parsed JSON, spawned asynchronously. */
+async function probeMediaFile(filePath: string): Promise<unknown> {
+  const { spawn } = await import("child_process");
+  return await new Promise<unknown>((resolve, reject) => {
+    const child = spawn(
+      "ffprobe",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        filePath,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    activeRenderChildren.add(child);
+
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      out += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (err.length < 2000) err += chunk.toString("utf8");
+    });
+    child.once("error", (e: any) => {
+      activeRenderChildren.delete(child);
+      reject(new Error(`ffprobe could not be started: ${e?.message ?? e}`));
+    });
+    child.once("close", (code: number | null) => {
+      activeRenderChildren.delete(child);
+      if (code !== 0) {
+        reject(
+          new Error(`ffprobe exited ${code}: ${err.trim().slice(0, 400) || "no stderr output"}`)
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(out));
+      } catch {
+        reject(new Error("ffprobe returned unparseable JSON"));
+      }
+    });
+  });
+}
+
+/** Keep at most this many non-progress stderr lines for render_error. */
+const FFMPEG_ERROR_LINES = 24;
+
+/**
+ * True for a `-stats` / `-progress` line.
+ *
+ * `-loglevel error -stats` interleaves progress with real errors on the same
+ * stream, so separating them is what keeps render_error readable instead of
+ * being 700 characters of `frame= ... speed=`.
+ */
+function isFfmpegStatsLine(line: string): boolean {
+  if (/^(frame|fps|size|total_size|bitrate|speed|out_time|out_time_us|out_time_ms|dup_frames|drop_frames|stream_\d|progress)=/.test(line)) {
+    return true;
+  }
+  return /\btime=\s*-?\d+:\d{2}:\d{2}/.test(line) && /\bbitrate=|\bspeed=/.test(line);
+}
+
+/**
+ * Run ffmpeg to completion, forwarding progress lines and keeping the tail of
+ * everything else for the error message.
+ *
+ * `spawn`, never `execSync`/`execFileSync`: blocking the event loop for the
+ * length of a render stops BullMQ renewing the job lock, the job is picked up as
+ * stalled, and the same edit renders twice.
+ */
+async function runFfmpeg(args: string[], onStatsLine: (line: string) => void): Promise<void> {
+  const { spawn } = await import("child_process");
+  return await new Promise<void>((resolve, reject) => {
+    const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    activeRenderChildren.add(child);
+
+    const errorLines: string[] = [];
+    let partial = "";
+
+    const consume = (line: string) => {
+      const trimmed = line.trim();
+      if (trimmed === "") return;
+      if (isFfmpegStatsLine(trimmed)) {
+        onStatsLine(trimmed);
+        return;
+      }
+      errorLines.push(trimmed.slice(0, 300));
+      if (errorLines.length > FFMPEG_ERROR_LINES) errorLines.shift();
+    };
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      // -stats separates updates with \r, not \n. Splitting on newlines alone
+      // accumulates one ever-growing line and never reports any progress.
+      partial += chunk.toString("utf8");
+      const parts = partial.split(/[\r\n]+/);
+      partial = parts.pop() ?? "";
+      // A pathological line with no separator must not grow without bound.
+      if (partial.length > 65536) partial = partial.slice(-4096);
+      for (const line of parts) consume(line);
+    });
+
+    child.once("error", (err: any) => {
+      activeRenderChildren.delete(child);
+      reject(new Error(`ffmpeg could not be started: ${err?.message ?? err}`));
+    });
+
+    child.once("close", (code: number | null, signal: string | null) => {
+      activeRenderChildren.delete(child);
+      if (partial) consume(partial);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = errorLines.join(" | ").slice(-700) || "no stderr output";
+      reject(new Error(`ffmpeg exited ${code ?? `on ${signal}`}: ${detail}`));
+    });
+  });
+}
+
+/** Progress band reserved for ffmpeg itself; downloads are below, upload above. */
+const RENDER_PROGRESS_FLOOR = 30;
+const RENDER_PROGRESS_CEIL = 85;
+/** Floor on the gap between two render_progress UPDATEs. */
+const RENDER_PROGRESS_MIN_INTERVAL_MS = 2000;
+
+/**
+ * Cap on the rendered output before it is read into a Buffer for the upload.
+ *
+ * `uploadFile` takes a Buffer, so this one read is unavoidable; the cap is what
+ * keeps it from becoming the OOM that streaming everything else avoided.
+ */
+const RENDER_MAX_OUTPUT_BYTES = 400 * 1024 * 1024;
+
+/**
+ * Render a video edit: Drive -> temp file -> ffmpeg -> temp file -> Drive.
+ *
+ * The filter graph and the whole argv come from src/lib/editor/ffmpeg-plan.ts,
+ * which is unit-tested and was validated against this image's ffmpeg 8.0.1.
+ * `plan.args` is passed through verbatim — appending or reordering flags here
+ * would silently invalidate that validation (notably `-display_rotation 0`
+ * and `-noautorotate`, which must stay INPUT options ahead of `-i`).
+ */
+async function renderVideoEdit(
+  editId: string,
+  edit: any
+): Promise<{
+  editId: string;
+  driveFileId: string;
+  width: number;
+  height: number;
+  durationMs: number | null;
+}> {
+  const { editDocSchema, reduceRatio } = await import("./src/lib/editor/doc");
+  const { parseProbe, buildRenderPlan, parseProgress } = await import(
+    "./src/lib/editor/ffmpeg-plan"
+  );
+
+  const doc = editDocSchema.parse(edit.doc);
+  const source = await resolveRenderSource(edit);
+  const { brandId, orgId } = source;
+
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const os = await import("os");
+
+  // One directory per job on the render-tmp volume (a real volume, not tmpfs —
+  // tmpfs would spend the container's memory limit on scratch files). The unique
+  // name is what stops two concurrent renders colliding, and the whole directory
+  // is what the finally removes.
+  const tmpRoot = process.env.RENDER_TMP_DIR || os.tmpdir();
+  await fs.mkdir(tmpRoot, { recursive: true });
+  const workDir = await fs.mkdtemp(path.join(tmpRoot, `edit-${editId.slice(0, 8)}-`));
+
+  try {
+    await setRenderState(editId, {
+      render_status: "rendering",
+      render_progress: 5,
+      render_error: null,
+    });
+
+    // ── Inputs: streamed to disk, never held as Buffers ──
+    const inputPath = path.join(
+      workDir,
+      `source${tmpExtension(source.fileName, source.fileType, ".mp4")}`
+    );
+    const inputBytes = await downloadDriveFileToDisk(
+      source.driveFileId,
+      brandId,
+      orgId,
+      inputPath
+    );
+    console.log(
+      `[render] ${editId}: source ${(inputBytes / 1024 / 1024).toFixed(1)} MB streamed to disk`
+    );
+    await setRenderState(editId, { render_progress: 15 });
+
+    // One browser-rasterised transparent PNG holding the whole layer stack; the
+    // planner composites it after the effects, exactly as the CSS preview
+    // filters only the media element.
+    const overlayFileId: string | null =
+      doc.overlayDriveFileId || edit.overlay_drive_file_id || null;
+    let overlayPngPath: string | null = null;
+    if (overlayFileId) {
+      overlayPngPath = path.join(workDir, "overlay.png");
+      await downloadDriveFileToDisk(overlayFileId, brandId, orgId, overlayPngPath);
+    }
+
+    let audioPath: string | null = null;
+    const track = await resolveAudioTrack(edit, doc.audio.trackId);
+    if (track) {
+      audioPath = path.join(
+        workDir,
+        `music${tmpExtension(track.name, track.mime_type, ".m4a")}`
+      );
+      await downloadDriveFileToDisk(track.drive_file_id, brandId, orgId, audioPath);
+    }
+
+    await setRenderState(editId, { render_progress: 25 });
+
+    // ── Plan ──
+    // Probe the REAL file. media_edits.source_* / media_assets columns are what
+    // the uploader happened to record; rotation, HDR transfer and the exact
+    // duration all come from the bytes we are about to feed ffmpeg.
+    const probe = parseProbe(await probeMediaFile(inputPath));
+    if (!probe.width || !probe.height) {
+      throw new Error("ffprobe found no video stream in the source file");
+    }
+
+    const outputPath = path.join(workDir, "out.mp4");
+    const plan = buildRenderPlan({
+      doc,
+      probe,
+      inputVideoPath: inputPath,
+      overlayPngPath,
+      audioPath,
+      outputPath,
+    });
+    if (plan.notes.length > 0) {
+      console.log(`[render] ${editId}: ${plan.notes.join("; ")}`);
+    }
+
+    // ── Encode ──
+    const total = plan.expectedDurationSeconds;
+    let lastPercentWritten = -1;
+    let lastWriteAt = 0;
+    let writeInFlight = false;
+
+    const reportProgress = (line: string) => {
+      const pct = parseProgress(line, total);
+      if (pct === null) return;
+      const mapped = Math.round(
+        RENDER_PROGRESS_FLOOR + (pct / 100) * (RENDER_PROGRESS_CEIL - RENDER_PROGRESS_FLOOR)
+      );
+      // Throttled three ways: the whole percent must actually have moved, two
+      // seconds must have passed, and the previous UPDATE must have landed.
+      // ffmpeg emits several stats lines a second and one write per line would
+      // be hundreds of UPDATEs on a short clip.
+      if (mapped === lastPercentWritten || writeInFlight) return;
+      const now = Date.now();
+      if (now - lastWriteAt < RENDER_PROGRESS_MIN_INTERVAL_MS) return;
+      lastPercentWritten = mapped;
+      lastWriteAt = now;
+      writeInFlight = true;
+      // Fire-and-forget: a progress write must never fail the render, and must
+      // never leave an unhandled rejection either.
+      void setRenderState(editId, { render_progress: mapped })
+        .catch(() => {})
+        .then(() => {
+          writeInFlight = false;
+        });
+    };
+
+    const startedAt = Date.now();
+    await runFfmpeg(plan.args, reportProgress);
+    const encodeSeconds = (Date.now() - startedAt) / 1000;
+
+    // ── Measure what ffmpeg ACTUALLY produced ──
+    // Not plan.expectedDurationSeconds and not doc.canvas: if ffmpeg emitted
+    // something else, the database has to say so. rules-engine.getValidActions
+    // matches aspect_ratio as an EXACT string, so a wrong value here silently
+    // removes every publish action later.
+    const outStat = await fs.stat(outputPath);
+    if (!outStat.size) throw new Error("ffmpeg produced an empty output file");
+    if (outStat.size > RENDER_MAX_OUTPUT_BYTES) {
+      throw new Error(
+        `Rendered output is ${(outStat.size / 1024 / 1024).toFixed(0)} MB, over the ${Math.round(
+          RENDER_MAX_OUTPUT_BYTES / 1024 / 1024
+        )} MB limit for a single upload`
+      );
+    }
+
+    const outProbe = parseProbe(await probeMediaFile(outputPath));
+    const outW = outProbe.width;
+    const outH = outProbe.height;
+    if (!outW || !outH) throw new Error("ffprobe found no video stream in the rendered output");
+    const aspectRatio = reduceRatio(outW, outH);
+    if (aspectRatio !== doc.canvas.ratio) {
+      console.warn(
+        `[render] ${editId}: output ${outW}x${outH} reduces to "${aspectRatio}", expected "${doc.canvas.ratio}"`
+      );
+    }
+    const durationMs =
+      outProbe.durationSeconds > 0 ? Math.round(outProbe.durationSeconds * 1000) : null;
+
+    await setRenderState(editId, { render_progress: 90 });
+
+    // ── Upload to Processed; the original stays untouched in Originals ──
+    const driveSvc = await import("./src/server/services/drive/client");
+    // A fresh client immediately before the upload. getAuthenticatedDrive
+    // re-checks the expiry and writes a refreshed token back to
+    // drive_connections, which uploadFile then reads — renders are long enough
+    // that the token the download used has often expired by now, and that has
+    // already bitten this project once.
+    await driveSvc.getAuthenticatedDrive(brandId, orgId);
+
+    const safeTitle =
+      String(edit.title || "edit")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 60) || "edit";
+    const fileName = `${safeTitle}-${doc.canvas.ratio.replace(":", "x")}-${Date.now()}.mp4`;
+
+    // The only moment the whole file is in memory: uploadFile takes a Buffer.
+    // Bounded by RENDER_MAX_OUTPUT_BYTES above.
+    const outputBuffer = await fs.readFile(outputPath);
+    const renderedDriveFileId = await driveSvc.uploadFile(
+      brandId,
+      orgId,
+      outputBuffer,
+      fileName,
+      "video/mp4",
+      "processed"
+    );
+
+    await setRenderState(editId, {
+      render_status: "ready",
+      render_progress: 100,
+      render_error: null,
+      rendered_drive_file_id: renderedDriveFileId,
+      rendered_width: outW,
+      rendered_height: outH,
+      rendered_aspect_ratio: aspectRatio,
+      rendered_duration_ms: durationMs,
+      rendered_file_size: outStat.size,
+      rendered_mime_type: "video/mp4",
+    });
+
+    console.log(
+      `[render] ${editId} ready: ${outW}x${outH} ${aspectRatio} ${
+        durationMs === null ? "unknown duration" : `${(durationMs / 1000).toFixed(2)}s`
+      } ${(outStat.size / 1024 / 1024).toFixed(2)} MB in ${encodeSeconds.toFixed(
+        1
+      )}s -> ${renderedDriveFileId}`
+    );
+
+    return { editId, driveFileId: renderedDriveFileId, width: outW, height: outH, durationMs };
+  } finally {
+    // Always: success, a failed ffmpeg, a bad document, and the SIGKILL-on-
+    // shutdown path all land here. The volume is small and one leaked source
+    // per failed render fills it.
+    await fs
+      .rm(workDir, { recursive: true, force: true })
+      .catch((e: any) =>
+        console.warn(`[render] ${editId}: could not remove ${workDir}: ${e?.message}`)
+      );
+  }
+}
+
+/** A still + music is still a video; cap it so a 2-hour podcast cannot be one. */
+const STILL_VIDEO_MAX_SECONDS = 600;
+
+/**
+ * Wrap an already-rendered still frame with a music track, producing an MP4.
+ *
+ * Deliberately a SECOND pass over the finished sharp output rather than an
+ * ffmpeg render of its own: the frame keeps the exact crop, overlay compositing
+ * and effect matrices the image path already produces, so a photo with music
+ * looks pixel-identical to the same photo without it. Rebuilding the frame in
+ * ffmpeg would reintroduce the preview/render divergence the browser-side
+ * overlay rasterisation exists to prevent (ffmpeg `drawtext` has no word wrap,
+ * and this image ships two fonts).
+ *
+ * The caller has already confirmed `doc.audio.trackId` is set.
+ */
+async function wrapStillAsVideo(params: {
+  editId: string;
+  edit: any;
+  doc: any;
+  still: Buffer;
+  brandId: string;
+  orgId: string;
+}): Promise<{
+  buffer: Buffer;
+  width: number;
+  height: number;
+  durationMs: number;
+  mimeType: string;
+} | null> {
+  const { editId, edit, doc, still, brandId, orgId } = params;
+
+  const track = await resolveAudioTrack(edit, doc.audio?.trackId ?? null);
+  if (!track) return null;
+
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const os = await import("os");
+  const { parseProbe } = await import("./src/lib/editor/ffmpeg-plan");
+
+  const tmpRoot = process.env.RENDER_TMP_DIR || os.tmpdir();
+  await fs.mkdir(tmpRoot, { recursive: true });
+  const workDir = await fs.mkdtemp(path.join(tmpRoot, `still-${editId.slice(0, 8)}-`));
+
+  try {
+    const stillPath = path.join(workDir, "still.png");
+    await fs.writeFile(stillPath, still);
+
+    const musicPath = path.join(
+      workDir,
+      `music${tmpExtension(track.name, track.mime_type, ".m4a")}`
+    );
+    await downloadDriveFileToDisk(track.drive_file_id, brandId, orgId, musicPath);
+
+    const musicProbe = parseProbe(await probeMediaFile(musicPath));
+    const audio = doc.audio ?? {};
+    const startOffset = Math.max(0, Number(audio.startOffset) || 0);
+    const loop = audio.loop !== false;
+
+    // Length comes from the track, minus any offset into it. A trim on the
+    // document wins when present, and looping lets a trim run past the track.
+    const trackSeconds = Number.isFinite(musicProbe.durationSeconds) ? musicProbe.durationSeconds : 0;
+    const trim = doc.base?.trim;
+    let seconds =
+      trim && trim.end > trim.start ? trim.end - trim.start : Math.max(0, trackSeconds - startOffset);
+    if (!loop && trackSeconds > 0) seconds = Math.min(seconds, Math.max(0, trackSeconds - startOffset));
+    seconds = Math.min(Math.max(seconds, 0.1), STILL_VIDEO_MAX_SECONDS);
+
+    // Audio chain. `volume` applies to the music (it is the only source here).
+    const filters: string[] = [];
+    const volume = Number(audio.volume);
+    if (Number.isFinite(volume) && Math.abs(volume - 1) > 1e-3) {
+      filters.push(`volume=${volume.toFixed(3)}`);
+    }
+    const fadeIn = Math.max(0, Number(audio.fadeIn) || 0);
+    if (fadeIn > 0) filters.push(`afade=t=in:st=0:d=${Math.min(fadeIn, seconds).toFixed(3)}`);
+    const fadeOut = Math.max(0, Number(audio.fadeOut) || 0);
+    if (fadeOut > 0) {
+      const d = Math.min(fadeOut, seconds);
+      filters.push(`afade=t=out:st=${Math.max(0, seconds - d).toFixed(3)}:d=${d.toFixed(3)}`);
+    }
+
+    const outputPath = path.join(workDir, "out.mp4");
+    const args: string[] = ["-hide_banner", "-loglevel", "error", "-stats", "-y"];
+    // Still input: one frame held for the whole duration.
+    args.push("-loop", "1", "-framerate", "30", "-i", stillPath);
+    // Music input. -stream_loop precedes its own -i; -ss seeks into the track.
+    if (loop) args.push("-stream_loop", "-1");
+    if (startOffset > 0) args.push("-ss", startOffset.toFixed(3));
+    args.push("-i", musicPath);
+    if (filters.length) args.push("-filter:a", filters.join(","));
+    args.push(
+      "-map", "0:v:0",
+      "-map", "1:a:0",
+      "-c:v", "libx264",
+      // stillimage tunes rate control for a frame that never changes, which is
+      // what keeps a 10-minute still from costing hundreds of megabytes.
+      "-tune", "stillimage",
+      "-preset", "veryfast",
+      "-pix_fmt", "yuv420p",
+      "-r", "30",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-ar", "44100",
+      "-t", seconds.toFixed(3),
+      "-movflags", "+faststart",
+      outputPath
+    );
+
+    await runFfmpeg(args, () => {});
+
+    const outProbe = parseProbe(await probeMediaFile(outputPath));
+    const stat = await fs.stat(outputPath);
+    if (stat.size > RENDER_MAX_OUTPUT_BYTES) {
+      throw new Error(
+        `Rendered video is ${Math.round(stat.size / 1024 / 1024)} MB, over the ${Math.round(
+          RENDER_MAX_OUTPUT_BYTES / 1024 / 1024
+        )} MB limit`
+      );
+    }
+
+    return {
+      buffer: await fs.readFile(outputPath),
+      width: outProbe.width,
+      height: outProbe.height,
+      durationMs: Math.round((outProbe.durationSeconds || seconds) * 1000),
+      mimeType: "video/mp4",
+    };
+  } finally {
+    await fs
+      .rm(workDir, { recursive: true, force: true })
+      .catch((e: any) =>
+        console.warn(`[render] ${editId}: could not remove ${workDir}: ${e?.message}`)
+      );
+  }
+}
+
+const renderWorker = new Worker(
+  "render",
+  async (job) => {
+    const editId: string | undefined = job.data?.editId;
+    if (!editId) throw new Error("render job has no editId");
+
+    const { data: edit } = await db().from("media_edits").select("*").eq("id", editId).single();
+    if (!edit) throw new Error(`media_edits ${editId} not found`);
+
+    try {
+      if (edit.kind === "video") return await renderVideoEdit(editId, edit);
+
+      // Relative dynamic imports resolve the "@/*" tsconfig paths under tsx
+      // (verified in this image), which is the escape hatch that lets this
+      // otherwise self-contained worker reuse the app's Drive upload, its token
+      // refresh and the shared render planner instead of duplicating them.
+      const { editDocSchema, reduceRatio } = await import("./src/lib/editor/doc");
+      const doc = editDocSchema.parse(edit.doc);
+
+      // Both paths resolve their source through the same helper so they cannot
+      // drift: an Editor-owned Drive original first, a pre-00042 library asset
+      // second.
+      const source = await resolveRenderSource(edit);
+      const { brandId, orgId } = source;
+
+      await setRenderState(editId, {
+        render_status: "rendering",
+        render_progress: 10,
+        render_error: null,
+      });
+
+      // Only drive_file_id is set on purpose: downloadFromDrive prefers
+      // processed_drive_file_id, and the editor must always start from the
+      // ORIGINAL rather than from a previously processed derivative.
+      const { buffer: sourceBuffer } = await downloadFromDrive(
+        {
+          drive_file_id: source.driveFileId,
+          file_name: source.fileName,
+          file_type: source.fileType,
+        },
+        orgId,
+        brandId
+      );
+
+      await setRenderState(editId, { render_progress: 35 });
+
+      const sharp = (await import("sharp")).default;
+
+      // Source dimensions in the ORIENTED frame, computed explicitly: EXIF
+      // orientations 5-8 transpose the image, and the document's crop is
+      // normalised against what the browser showed.
+      const probe = await sharp(sourceBuffer, { failOn: "none" }).metadata();
+      const orientation = probe.orientation ?? 1;
+      const transposed = orientation >= 5 && orientation <= 8;
+      const srcW = (transposed ? probe.height : probe.width) ?? 0;
+      const srcH = (transposed ? probe.width : probe.height) ?? 0;
+      if (!srcW || !srcH) throw new Error("Could not read the source image dimensions");
+
+      const background = doc.canvas.background.color || "#000000";
+      const t = doc.base.transform as BaseTransform;
+      const { planCoverGeometry } = await import("./src/lib/editor/sharp-plan");
+      const geom = planCoverGeometry(doc.canvas.w, doc.canvas.h, doc.base.crop, t, srcW, srcH);
+
+      const { colour, blurSigma } = buildEffectChain(doc.effects);
+
+      // Pass 1 — geometry and effects on the base image only.
+      //
+      // Staged deliberately through raw intermediates rather than chained in
+      // one sharp call: sharp applies operations in its own fixed internal
+      // order, not call order, so a chained .flip()/.rotate()/.resize() would
+      // NOT reproduce the CSS order `rotate(r) scale(sx,sy)` the preview uses.
+      // Each stage is skipped when it is a no-op, so the common identity case
+      // costs exactly what the previous single-extract version did.
+      let staged = sharp(sourceBuffer, { failOn: "none" })
+        .rotate() // EXIF orientation FIRST, always — see note (3) above.
+        .extract(geom.extract);
+      if (geom.extend) {
+        staged = staged.extend({ ...geom.extend, background });
+      }
+
+      if (t.flipH || t.flipV) {
+        const flipped = await staged.raw().toBuffer({ resolveWithObject: true });
+        let s = sharp(flipped.data, {
+          raw: {
+            width: flipped.info.width,
+            height: flipped.info.height,
+            channels: flipped.info.channels as 1 | 2 | 3 | 4,
+          },
+        });
+        if (t.flipH) s = s.flop(); // mirror horizontally (CSS scaleX(-1))
+        if (t.flipV) s = s.flip(); // mirror vertically   (CSS scaleY(-1))
+        staged = s;
+      }
+
+      if (t.rotate % 360 !== 0) {
+        const pre = await staged.raw().toBuffer({ resolveWithObject: true });
+        staged = sharp(pre.data, {
+          raw: {
+            width: pre.info.width,
+            height: pre.info.height,
+            channels: pre.info.channels as 1 | 2 | 3 | 4,
+          },
+        }).rotate(t.rotate, { background });
+      }
+
+      // `fill` not `cover`: planCoverGeometry already solved the framing, so the
+      // staged patch has the canvas aspect and must not be re-cropped here.
+      // t.scale is carried by that rect too, so it needs no separate step.
+      let base = staged
+        .resize(doc.canvas.w, doc.canvas.h, { fit: "fill" })
+        // Kill any alpha from a transparent source so the canvas background
+        // shows through rather than leaving an alpha channel in a JPEG.
+        .flatten({ background })
+        .toColourspace("srgb");
+
+      if (!isIdentityMatrix(colour.m)) {
+        // sharp types recomb as a fixed 3x3 tuple; the composed matrix is built
+        // as number[][] but is always exactly 3x3.
+        base = base.recomb(
+          colour.m as [
+            [number, number, number],
+            [number, number, number],
+            [number, number, number],
+          ]
+        );
+      }
+      if (colour.off.some((v) => Math.abs(v) > 1e-6)) {
+        base = base.linear([1, 1, 1], colour.off);
+      }
+      if (blurSigma >= 0.3) base = base.blur(Math.min(blurSigma, 1000));
+
+      const rendered = await base.raw().toBuffer({ resolveWithObject: true });
+
+      await setRenderState(editId, { render_progress: 60 });
+
+      // Pass 2 — composite the browser-rasterised overlay, un-filtered, then
+      // encode.  The overlay may have been rasterised at devicePixelRatio, so it
+      // is resized to the exact canvas before compositing.
+      let out = sharp(rendered.data, {
+        raw: {
+          width: rendered.info.width,
+          height: rendered.info.height,
+          channels: rendered.info.channels as 1 | 2 | 3 | 4,
+        },
+      });
+
+      const overlayFileId: string | null = doc.overlayDriveFileId || edit.overlay_drive_file_id || null;
+      if (overlayFileId) {
+        const { buffer: overlayRaw } = await downloadFromDrive(
+          { drive_file_id: overlayFileId, file_name: "overlay.png", file_type: "image/png" },
+          orgId,
+          brandId
+        );
+        const overlayPng = await sharp(overlayRaw, { failOn: "none" })
+          .resize(doc.canvas.w, doc.canvas.h, { fit: "fill" })
+          .png()
+          .toBuffer();
+        out = out.composite([{ input: overlayPng, top: 0, left: 0 }]);
+      }
+
+      // A still that is about to be wrapped with music is encoded as PNG
+      // whatever the source was: it becomes libx264's input, so a JPEG pass
+      // would add generation loss for nothing.
+      const wantsMusic = Boolean(doc.audio?.trackId);
+      // PNG only for a PNG source (flat artwork, where JPEG ringing is visible);
+      // JPEG for everything else, which is what the platform publishers prefer.
+      const wantPng = wantsMusic || source.fileType === "image/png";
+      let mimeType = wantPng ? "image/png" : "image/jpeg";
+      const encoded = await (wantPng ? out.png() : out.jpeg({ quality: 90 })).toBuffer({
+        resolveWithObject: true,
+      });
+
+      await setRenderState(editId, { render_progress: 80 });
+
+      let payload: Buffer = encoded.data;
+      let outW = encoded.info.width;
+      let outH = encoded.info.height;
+      let durationMs: number | null = null;
+      let extension = wantPng ? "png" : "jpg";
+
+      // Music on a photo makes the output a VIDEO — the user's explicit ask.
+      // `edit.kind` stays 'image', so everything downstream must read
+      // `rendered_mime_type` rather than `kind` to know what this file is.
+      if (wantsMusic) {
+        const wrapped = await wrapStillAsVideo({
+          editId,
+          edit,
+          doc,
+          still: encoded.data,
+          brandId,
+          orgId,
+        });
+        if (wrapped) {
+          payload = wrapped.buffer;
+          outW = wrapped.width;
+          outH = wrapped.height;
+          durationMs = wrapped.durationMs;
+          mimeType = wrapped.mimeType;
+          extension = "mp4";
+        } else {
+          // The track vanished or belongs to another brand. Ship the still
+          // rather than failing the whole render.
+          console.warn(`[render] ${editId}: audio track unavailable; rendering a still instead`);
+        }
+      }
+      const aspectRatio = reduceRatio(outW, outH);
+      if (aspectRatio !== doc.canvas.ratio) {
+        // rules-engine.getValidActions matches aspect_ratio as an EXACT string,
+        // so a mismatch here silently removes every publish action later.
+        console.warn(
+          `[render] ${editId}: output ${outW}x${outH} reduces to "${aspectRatio}", expected "${doc.canvas.ratio}"`
+        );
+      }
+
+      const driveSvc = await import("./src/server/services/drive/client");
+      const safeTitle =
+        String(edit.title || "edit")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 60) || "edit";
+      const fileName = `${safeTitle}-${doc.canvas.ratio.replace(":", "x")}-${Date.now()}.${extension}`;
+
+      const renderedDriveFileId = await driveSvc.uploadFile(
+        brandId,
+        orgId,
+        payload,
+        fileName,
+        mimeType,
+        "processed"
+      );
+
+      await setRenderState(editId, {
+        render_status: "ready",
+        render_progress: 100,
+        render_error: null,
+        rendered_drive_file_id: renderedDriveFileId,
+        rendered_width: outW,
+        rendered_height: outH,
+        rendered_aspect_ratio: aspectRatio,
+        rendered_duration_ms: durationMs,
+        rendered_file_size: payload.length,
+        rendered_mime_type: mimeType,
+      });
+
+      console.log(
+        `[render] ${editId} ready: ${outW}x${outH} ${aspectRatio} ${(
+          encoded.data.length / 1024
+        ).toFixed(0)} KB -> ${renderedDriveFileId}`
+      );
+
+      return { editId, driveFileId: renderedDriveFileId, width: outW, height: outH };
+    } catch (err: any) {
+      const message = String(err?.message ?? "Render failed").slice(0, 1000);
+      await setRenderState(editId, { render_status: "failed", render_error: message }).catch(() => {});
+      // Rethrow so BullMQ records the failure and applies its backoff.  A retry
+      // sets render_status back to 'rendering' on its first write, so the row is
+      // only left 'failed' once the attempts are exhausted.
+      throw err;
+    }
+  },
+  { connection: redis, concurrency: 1 }
+);
+
+renderWorker.on("failed", (job, err) => {
+  console.error(`[render] job ${job?.id} (edit ${job?.data?.editId}) failed:`, err?.message);
+});
+
+// ─── Editor audio import: an Instagram reel's audio → the brand's track library ───
+//
+// This lives in the worker and not in a route handler or a tRPC mutation for one
+// hard reason: ffmpeg and ffprobe are installed in the Dockerfile's `worker` and
+// `dev` stages only. The production `app` stage has neither, so there is no
+// in-request place to transcode. The tRPC mutation creates an `importing` row
+// and enqueues its id; everything below fills that row in.
+
+/**
+ * Cap on the reel we are willing to pull down.
+ *
+ * Streamed to disk rather than buffered, so this protects the render volume and
+ * a wedged/hostile response — not the heap. The heap is protected by never
+ * holding the video in memory at all: an OOM in this process kills all 13
+ * workers, including a publish job that has created an Instagram container but
+ * not yet recorded platform_post_id, which then re-posts on retry.
+ */
+const AUDIO_IMPORT_MAX_INPUT_BYTES = 300 * 1024 * 1024;
+
+/**
+ * Cap on the extracted track. 50MB is what `/api/editor/asset` accepts for an
+ * uploaded one (`EDITOR_ASSET_KINDS.audio.maxBytes`), and a track the library
+ * would refuse by one door must not arrive through another. This one IS a heap
+ * bound as well: `uploadFile` takes a Buffer, so the output is read whole.
+ */
+const AUDIO_IMPORT_MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
+
+/** Whole-download deadline. A reel is seconds of audio; minutes means stuck. */
+const AUDIO_IMPORT_FETCH_TIMEOUT_MS = 180_000;
+
+/** Deadline for the HEAD-like redirect hop on a `/share/<token>` link. */
+const AUDIO_IMPORT_REDIRECT_TIMEOUT_MS = 20_000;
+
+/** Browser UA, matching `/api/insta-media`: the CDN refuses unusual clients. */
+const AUDIO_IMPORT_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/**
+ * Every in-flight Instagram fetch, so a SIGTERM can abort it.
+ *
+ * The same reasoning as `activeRenderChildren`: `audioImportWorker.close()`
+ * waits for the active job, and a download has up to
+ * AUDIO_IMPORT_FETCH_TIMEOUT_MS to run, so without this shutdown would hang
+ * until Docker SIGKILLs the process — and a SIGKILL skips the `finally` that
+ * removes the work directory from the render volume. Aborting makes the job fail
+ * fast, which lets that finally run.
+ */
+const activeAudioImportFetches = new Set<AbortController>();
+
+function abortActiveAudioImports(): void {
+  for (const controller of activeAudioImportFetches) {
+    try {
+      controller.abort();
+    } catch {
+      // Already settled.
+    }
+  }
+}
+
+/** Anything the user can read and act on; everything else keeps its own text. */
+class AudioImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AudioImportError";
+  }
+}
+
+async function setAudioImportState(trackId: string, patch: Record<string, unknown>): Promise<void> {
+  await db()
+    .from("audio_tracks")
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq("id", trackId);
+}
+
+/**
+ * The Instagram cookie to fetch with, or null for an anonymous attempt.
+ *
+ * Replicates `insta-fetcher.ts`'s lookup (this brand's org first, then any
+ * active session, because the local studio shares one) rather than importing
+ * it: `resolveAnyActiveSession` there is module-private, and this worker is
+ * deliberately self-contained apart from relative dynamic imports.
+ *
+ * A missing or undecryptable session is NOT an error here — anonymous reads
+ * still work for some public reels, and failing early would turn "Instagram
+ * refused this" into "you have no session", which is a different claim.
+ */
+async function resolveInstagramCookie(
+  orgId: string
+): Promise<{ cookie: string; csrftoken: string; hadSession: boolean }> {
+  const read = async (scoped: boolean) => {
+    let query = db()
+      .from("insta_sessions")
+      .select("session_id_encrypted")
+      .eq("status", "active");
+    if (scoped) query = query.eq("org_id", orgId);
+    const { data } = await query.order("created_at", { ascending: false }).limit(1).maybeSingle();
+    return data?.session_id_encrypted ?? null;
+  };
+
+  let raw: string | null = null;
+  try {
+    raw = (await read(true)) ?? (await read(false));
+  } catch {
+    raw = null;
+  }
+  if (!raw) return { cookie: "", csrftoken: "", hadSession: false };
+
+  try {
+    const { normalizeSession } = await import("./src/server/services/instagram/fetcher");
+    const session = normalizeSession(decrypt(raw));
+    return { cookie: session.cookie, csrftoken: session.csrftoken ?? "", hadSession: true };
+  } catch {
+    // A session that will not decrypt is the same situation as none at all.
+    return { cookie: "", csrftoken: "", hadSession: false };
+  }
+}
+
+/**
+ * Follow a `/share/<token>` link to the reel it points at.
+ *
+ * The token is opaque — base64-decoding it the way a shortcode is decoded would
+ * produce a real-looking but wrong media id, and the import would then quietly
+ * fetch somebody else's post. The destination is re-validated through
+ * `parseInstagramMediaUrl`, so the redirect cannot walk off instagram.com.
+ */
+async function resolveInstagramShareLink(shareUrl: string, cookie: string): Promise<string> {
+  const { parseInstagramMediaUrl } = await import("./src/lib/editor/instagram-audio");
+  const controller = new AbortController();
+  activeAudioImportFetches.add(controller);
+  const timer = setTimeout(() => controller.abort(), AUDIO_IMPORT_REDIRECT_TIMEOUT_MS);
+
+  let finalUrl: string;
+  try {
+    const res = await fetch(shareUrl, {
+      redirect: "follow",
+      signal: controller.signal,
+      cache: "no-store",
+      headers: { "User-Agent": AUDIO_IMPORT_UA, Accept: "*/*", ...(cookie ? { Cookie: cookie } : {}) },
+    });
+    finalUrl = res.url || shareUrl;
+    // The body is HTML we have no use for; not draining it leaves the socket
+    // held until GC.
+    await res.body?.cancel().catch(() => {});
+  } catch (err: any) {
+    throw new AudioImportError(
+      `Could not follow that Instagram share link: ${err?.name === "AbortError" ? "it timed out" : err?.message}`
+    );
+  } finally {
+    clearTimeout(timer);
+    activeAudioImportFetches.delete(controller);
+  }
+
+  const parsed = parseInstagramMediaUrl(finalUrl);
+  if (!parsed.ok || parsed.value.needsRedirectResolve || !parsed.value.shortcode) {
+    throw new AudioImportError(
+      "That share link did not resolve to a reel or post. Open it in a browser and copy the reel link instead."
+    );
+  }
+  return parsed.value.shortcode;
+}
+
+/**
+ * Stream a URL to `destPath`, refusing to exceed `maxBytes`.
+ *
+ * A counting Transform rather than a Content-Length check: the header is
+ * optional, and advisory even when present. Nothing is accumulated — the
+ * transform passes each chunk straight through and only adds up its length.
+ */
+async function downloadUrlToDisk(
+  url: string,
+  destPath: string,
+  maxBytes: number,
+  cookie: string
+): Promise<{ bytes: number; contentType: string | null }> {
+  const fs = await import("fs");
+  const { Readable, Transform } = await import("stream");
+  const { pipeline } = await import("stream/promises");
+
+  const controller = new AbortController();
+  activeAudioImportFetches.add(controller);
+  const timer = setTimeout(() => controller.abort(), AUDIO_IMPORT_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: {
+        "User-Agent": AUDIO_IMPORT_UA,
+        // The Instagram CDN rejects hotlinked media without this, exactly as
+        // `/api/insta-media/route.ts` documents.
+        Referer: "https://www.instagram.com/",
+        Accept: "*/*",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+    });
+
+    if (!res.ok || !res.body) {
+      throw new AudioImportError(
+        `Instagram's media server returned ${res.status}${res.statusText ? ` ${res.statusText}` : ""} for that reel's video.`
+      );
+    }
+
+    const declared = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new AudioImportError(
+        `That reel's video is ${(declared / 1024 / 1024).toFixed(0)}MB, over the ${(maxBytes / 1024 / 1024).toFixed(0)}MB import limit.`
+      );
+    }
+
+    let bytes = 0;
+    const counter = new Transform({
+      transform(chunk: Buffer, _enc: unknown, cb: (e?: Error | null, c?: Buffer) => void) {
+        bytes += chunk.length;
+        if (bytes > maxBytes) {
+          cb(
+            new AudioImportError(
+              `That reel's video is over the ${(maxBytes / 1024 / 1024).toFixed(0)}MB import limit.`
+            )
+          );
+          return;
+        }
+        cb(null, chunk);
+      },
+    });
+
+    await pipeline(
+      Readable.fromWeb(res.body as any),
+      counter,
+      fs.createWriteStream(destPath)
+    );
+
+    if (!bytes) throw new AudioImportError("Instagram returned an empty video for that reel.");
+    return { bytes, contentType: res.headers.get("content-type") };
+  } catch (err: any) {
+    if (err instanceof AudioImportError) throw err;
+    if (err?.name === "AbortError") {
+      throw new AudioImportError("Downloading that reel's video from Instagram timed out.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    activeAudioImportFetches.delete(controller);
+  }
+}
+
+/** `{ hasAudio, durationMs }` out of a parsed ffprobe payload. */
+function readAudioProbe(probe: unknown): { hasAudio: boolean; durationMs: number | null } {
+  const p = probe as {
+    streams?: Array<{ codec_type?: string; duration?: string | number }>;
+    format?: { duration?: string | number };
+  };
+  const streams = Array.isArray(p?.streams) ? p.streams : [];
+  const audio = streams.filter((s) => s?.codec_type === "audio");
+
+  const seconds = Number(p?.format?.duration ?? audio[0]?.duration ?? NaN);
+  return {
+    hasAudio: audio.length > 0,
+    // Unknown stays null rather than becoming a 0, which would silently
+    // truncate every trim and fade the user later builds on this track.
+    durationMs: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null,
+  };
+}
+
+/**
+ * Resolve an `importing` track's Instagram URL, extract its audio and complete
+ * the row.
+ *
+ * Every exit path goes through the `finally` that removes the work directory.
+ */
+async function importAudioFromInstagram(trackId: string): Promise<{
+  trackId: string;
+  driveFileId: string;
+  durationMs: number | null;
+  bytes: number;
+}> {
+  const { data: track } = await db()
+    .from("audio_tracks")
+    .select("id, brand_id, name, source_url, import_status, drive_file_id")
+    .eq("id", trackId)
+    .maybeSingle();
+
+  if (!track) {
+    // The user deleted the row while the job was queued. Not a failure.
+    throw new AudioImportError(`audio_tracks ${trackId} no longer exists`);
+  }
+  if (track.import_status !== "importing") {
+    throw new AudioImportError(
+      `audio_tracks ${trackId} is '${track.import_status}', not 'importing' — nothing to do`
+    );
+  }
+  if (!track.source_url) throw new AudioImportError("This track has no Instagram link to import");
+
+  const { data: brand } = await db()
+    .from("brands")
+    .select("id, org_id")
+    .eq("id", track.brand_id)
+    .maybeSingle();
+  if (!brand?.org_id) throw new AudioImportError("Brand not found for this track");
+  const brandId: string = track.brand_id;
+  const orgId: string = brand.org_id;
+
+  const { parseInstagramMediaUrl, isInstagramMediaHost, instagramTrackName } = await import(
+    "./src/lib/editor/instagram-audio"
+  );
+
+  // Re-validated here and not taken on trust: the row has been through the
+  // database since the mutation checked it, and this worker holds the service
+  // role.
+  const parsed = parseInstagramMediaUrl(track.source_url);
+  if (!parsed.ok) throw new AudioImportError(parsed.reason);
+
+  const { cookie, csrftoken, hadSession } = await resolveInstagramCookie(orgId);
+
+  const shortcode = parsed.value.needsRedirectResolve
+    ? await resolveInstagramShareLink(parsed.value.canonicalUrl, cookie)
+    : parsed.value.shortcode!;
+
+  // The existing service layer, reused rather than reimplemented: two tiers
+  // (the private media-info endpoint, then the GraphQL web fallback), plain
+  // fetch, no Chromium.
+  const { fetchInstagramVideoDetails } = await import(
+    "./src/server/services/instagram/fetcher"
+  );
+  const details = await fetchInstagramVideoDetails(shortcode, cookie, csrftoken);
+
+  if (!details.ok || !details.videoUrl) {
+    const reason = details.error || "Instagram did not return a video for that link.";
+    throw new AudioImportError(
+      hadSession
+        ? reason
+        : `${reason} No active Instagram session is saved, so this was an anonymous request.`
+    );
+  }
+
+  // The media URL comes back from Instagram, so it is data. Pinning it to the
+  // Instagram/Facebook CDNs is what keeps a surprising API response from
+  // turning this job into a fetcher for an arbitrary host.
+  let mediaHost: string;
+  try {
+    const mediaUrl = new URL(details.videoUrl);
+    mediaHost = mediaUrl.hostname;
+    if (mediaUrl.protocol !== "https:" || !isInstagramMediaHost(mediaHost)) {
+      throw new AudioImportError(
+        `Instagram returned a video URL on an unexpected host (${mediaHost}); refusing to download it.`
+      );
+    }
+  } catch (err: any) {
+    if (err instanceof AudioImportError) throw err;
+    throw new AudioImportError("Instagram returned a video URL that could not be parsed.");
+  }
+
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const os = await import("os");
+
+  // Same work-directory pattern as a render: one mkdtemp per job on the
+  // render-tmp volume (a real volume, not tmpfs — tmpfs would spend the
+  // container's memory limit on scratch files), and the whole directory is what
+  // the finally removes.
+  const tmpRoot = process.env.RENDER_TMP_DIR || os.tmpdir();
+  await fs.mkdir(tmpRoot, { recursive: true });
+  const workDir = await fs.mkdtemp(path.join(tmpRoot, `audio-${trackId.slice(0, 8)}-`));
+
+  let uploadedDriveFileId: string | null = null;
+
+  try {
+    const videoPath = path.join(workDir, "reel.mp4");
+    console.log(`[audio-import] ${trackId}: downloading ${shortcode} from ${mediaHost}`);
+    const { bytes: inputBytes } = await downloadUrlToDisk(
+      details.videoUrl,
+      videoPath,
+      AUDIO_IMPORT_MAX_INPUT_BYTES,
+      cookie
+    );
+
+    const inputProbe = readAudioProbe(await probeMediaFile(videoPath));
+    if (!inputProbe.hasAudio) {
+      // Explicitly not "extract anyway": ffmpeg with -vn and no audio stream
+      // produces a valid, silent, useless file, and the user would only find
+      // out after putting it under a video.
+      throw new AudioImportError("That reel has no audio track.");
+    }
+
+    const audioPath = path.join(workDir, "audio.m4a");
+    await runFfmpeg(
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        videoPath,
+        // Drop the video, re-encode to AAC in MP4. Not `-c:a copy`: the source
+        // is often AAC already but may be Opus in WebM, and the track has to be
+        // something both the browser's <audio> preview and the render's music
+        // bed can read.
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        // Moves the moov atom to the front so the panel's preview can start
+        // playing before the whole file has arrived from Drive.
+        "-movflags",
+        "+faststart",
+        audioPath,
+      ],
+      () => {}
+    );
+
+    const outStat = await fs.stat(audioPath);
+    if (!outStat.size) throw new AudioImportError("Extracting the audio produced an empty file.");
+    if (outStat.size > AUDIO_IMPORT_MAX_OUTPUT_BYTES) {
+      throw new AudioImportError(
+        `The extracted audio is ${(outStat.size / 1024 / 1024).toFixed(0)}MB, over the ${(
+          AUDIO_IMPORT_MAX_OUTPUT_BYTES / 1024 / 1024
+        ).toFixed(0)}MB limit for a track.`
+      );
+    }
+
+    // Probed from the OUTPUT, not from `details.duration` (which Instagram
+    // rounds to whole seconds) and not from the input: this is the file the
+    // editor will trim and fade, so its length has to be its own.
+    const outputProbe = readAudioProbe(await probeMediaFile(audioPath));
+    if (!outputProbe.hasAudio) {
+      throw new AudioImportError("The extracted file has no audio stream.");
+    }
+
+    const driveSvc = await import("./src/server/services/drive/client");
+    const safeShortcode = shortcode.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || "reel";
+    const fileName = `instagram-${safeShortcode}-${Date.now()}.m4a`;
+
+    // Bounded by AUDIO_IMPORT_MAX_OUTPUT_BYTES above; `uploadFile` takes a
+    // Buffer, so this one read is unavoidable.
+    const payload = await fs.readFile(audioPath);
+    uploadedDriveFileId = await driveSvc.uploadFile(
+      brandId,
+      orgId,
+      payload,
+      fileName,
+      "audio/mp4",
+      "processed"
+    );
+
+    const { data: completed } = await db()
+      .from("audio_tracks")
+      .update({
+        name: instagramTrackName(shortcode, details.ownerUsername),
+        drive_file_id: uploadedDriveFileId,
+        mime_type: "audio/mp4",
+        duration_ms: outputProbe.durationMs,
+        file_size: payload.length,
+        import_status: "ready",
+        import_error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", trackId)
+      .eq("brand_id", brandId)
+      .select("id")
+      .maybeSingle();
+
+    if (!completed) {
+      // The row went away mid-import. The file just uploaded is litter in the
+      // user's Drive that nobody has ever seen, so the finally removes that ONE
+      // file — the same orphan cleanup `/api/editor/asset/route.ts` does for its
+      // own just-created upload.
+      throw new AudioImportError("This track was removed while its audio was being imported.");
+    }
+
+    const driveFileId = uploadedDriveFileId;
+    uploadedDriveFileId = null; // committed; the finally must not remove it
+
+    console.log(
+      `[audio-import] ${trackId} ready: ${shortcode} ${(inputBytes / 1024 / 1024).toFixed(
+        1
+      )}MB video -> ${(payload.length / 1024).toFixed(0)} KB audio, ${
+        outputProbe.durationMs ?? "unknown"
+      } ms -> ${fileName} (${driveFileId})`
+    );
+
+    return {
+      trackId,
+      driveFileId,
+      durationMs: outputProbe.durationMs,
+      bytes: payload.length,
+    };
+  } finally {
+    if (uploadedDriveFileId) {
+      const orphan = uploadedDriveFileId;
+      const driveSvc = await import("./src/server/services/drive/client");
+      await driveSvc
+        .deleteFile(orphan, brandId, orgId)
+        .catch((e: any) =>
+          console.warn(`[audio-import] ${trackId}: could not remove orphan ${orphan}: ${e?.message}`)
+        );
+    }
+    await fs
+      .rm(workDir, { recursive: true, force: true })
+      .catch((e: any) =>
+        console.warn(`[audio-import] ${trackId}: could not remove ${workDir}: ${e?.message}`)
+      );
+  }
+}
+
+const audioImportWorker = new Worker(
+  "audio-import",
+  async (job) => {
+    const trackId: string | undefined = job.data?.trackId;
+    if (!trackId) throw new Error("audio-import job has no trackId");
+
+    try {
+      return await importAudioFromInstagram(trackId);
+    } catch (err: any) {
+      // The user's only window into this is `import_error`, so the message has
+      // to survive. An AudioImportError is already written for them; anything
+      // else is a surprise and is reported as itself rather than as a
+      // reassuring summary.
+      const message = String(err?.message ?? "Importing the audio failed").slice(0, 1000);
+      await setAudioImportState(trackId, {
+        import_status: "failed",
+        import_error: message,
+      }).catch(() => {});
+      throw err;
+    }
+  },
+  // Two at a time: each one is mostly waiting on Instagram, but they share a
+  // single platform session and the render volume, and Instagram rate-limits
+  // aggressively.
+  { connection: redis, concurrency: 2 }
+);
+
+audioImportWorker.on("failed", (job, err) => {
+  console.error(
+    `[audio-import] job ${job?.id} (track ${job?.data?.trackId}) failed:`,
+    err?.message
+  );
+});
+
 console.log("Worker starting...");
 verifyStartup().then(() => {
   console.log("Worker ready. Listening for jobs...");
@@ -4917,6 +6935,15 @@ verifyStartup().then(() => {
 
 process.on("SIGTERM", async () => {
   console.log("Shutting down...");
+  // ffmpeg first: renderWorker.close() waits for the active job, so a render in
+  // progress would hold shutdown open until Docker SIGKILLs the process — and a
+  // SIGKILL skips renderVideoEdit's finally, leaking the whole temp directory on
+  // the render volume.  Killing the child makes the job fail fast, which lets
+  // that finally run.
+  killActiveRenderChildren();
+  // Same reason, different mechanism: an audio import can be parked on a fetch
+  // from Instagram rather than on a child process.
+  abortActiveAudioImports();
   await publishWorker.close();
   await analyticsWorker.close();
   await historicalWorker.close();
@@ -4928,6 +6955,8 @@ process.on("SIGTERM", async () => {
   await commentSyncWorker.close();
   await commentReplyWorker.close();
   await instaCommentWorker.close();
+  await renderWorker.close();
+  await audioImportWorker.close();
   await redis.quit();
   process.exit(0);
 });

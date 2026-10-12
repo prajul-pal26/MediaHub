@@ -2,7 +2,6 @@
 
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { ModeSwitcher } from "@/components/common/ModeSwitcher";
 import { BrandSwitcher } from "@/components/common/BrandSwitcher";
 import {
   DropdownMenu,
@@ -13,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { LogOut, Settings } from "lucide-react";
 import { isGodUser } from "@/lib/god";
+import { DeploymentModeToggle } from "./DeploymentModeToggle";
 import type { UserProfile, Brand } from "@/lib/types";
 
 interface HeaderProps {
@@ -46,9 +46,9 @@ export function Header({ profile, brands, selectedBrandId, onBrandChange }: Head
         )}
       </div>
 
-      <ModeSwitcher />
-
       <div className="flex items-center gap-2">
+        {/* Local-build only — renders null on Vercel. */}
+        <DeploymentModeToggle />
         {profile && (
           <DropdownMenu>
             <DropdownMenuTrigger className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">

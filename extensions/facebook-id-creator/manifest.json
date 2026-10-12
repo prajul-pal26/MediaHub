@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "MediaHub Facebook ID Creator",
+  "version": "1.0.0",
+  "minimum_chrome_version": "120",
+  "description": "Fills a user-reviewed Facebook sign-up form from local MediaHub and submits only after a separate user click. It never stores credentials or reads verification codes.",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://m.facebook.com/*",
+    "https://localhost:3443/*",
+    "https://127.0.0.1:3443/*",
+    "https://192.168.1.5:3443/*",
+    "https://pranjuls-macbook-pro.local:3443/*",
+    "http://localhost:8080/*",
+    "http://127.0.0.1:8080/*",
+    "http://192.168.1.5:8080/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://localhost:3443/*",
+        "https://127.0.0.1:3443/*",
+        "https://192.168.1.5:3443/*",
+        "https://pranjuls-macbook-pro.local:3443/*",
+        "http://localhost:8080/*",
+        "http://127.0.0.1:8080/*",
+        "http://192.168.1.5:8080/*"
+      ],
+      "js": ["mediahub-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.facebook.com/*",
+        "https://m.facebook.com/*"
+      ],
+      "js": ["facebook-signup.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "MediaHub Facebook ID Creator" },
+  "incognito": "not_allowed"
+}

@@ -66,7 +66,8 @@ function createOAuth2Client(clientId: string, clientSecret: string, redirectUri:
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-async function getAuthenticatedDrive(brandId: string, orgId: string): Promise<drive_v3.Drive> {
+/** Callers must verify both organization membership and access to this brand. */
+export async function getAuthenticatedDrive(brandId: string, orgId: string): Promise<drive_v3.Drive> {
   const db = getDb();
   const { data: conn, error } = await db
     .from("drive_connections")
@@ -411,6 +412,38 @@ export async function downloadFile(
   const res = await drive.files.get(
     { fileId: driveFileId, alt: "media" },
     { responseType: "arraybuffer" }
+  );
+
+  return Buffer.from(res.data as ArrayBuffer);
+}
+
+/**
+ * Download only part of a file, by forwarding a Range header to Drive.
+ *
+ * Without this, serving a browser's Range request meant pulling the WHOLE file
+ * from Drive and slicing it. A `<video preload="metadata">` on a grid card asks
+ * for a few hundred KB but cost a full 20 MB Drive round-trip — measured at
+ * 1.3–3.4s per video card, which was the slowest thing left on the Media
+ * Library. It is also a memory problem: the un-ranged path holds the entire
+ * file resident per concurrent request, and the `app` container has no
+ * mem_limit.
+ *
+ * `end` is INCLUSIVE, matching both HTTP and `Buffer.subarray(start, end + 1)`.
+ * Returns the bytes Drive actually sent, which may be fewer than requested at
+ * end-of-file — the caller must use `.length` rather than assuming the span.
+ */
+export async function downloadFileRange(
+  driveFileId: string,
+  brandId: string,
+  orgId: string,
+  start: number,
+  end: number
+): Promise<Buffer> {
+  const drive = await getAuthenticatedDrive(brandId, orgId);
+
+  const res = await drive.files.get(
+    { fileId: driveFileId, alt: "media" },
+    { responseType: "arraybuffer", headers: { Range: `bytes=${start}-${end}` } }
   );
 
   return Buffer.from(res.data as ArrayBuffer);

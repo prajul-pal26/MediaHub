@@ -58,6 +58,7 @@ export async function updateSession(request: NextRequest) {
     pathname.startsWith("/signup") ||
     pathname.startsWith("/reset-password") ||
     pathname.startsWith("/api") ||
+    pathname.startsWith("/videos") ||
     pathname.startsWith("/callback/auth");
 
   // OPEN-STUDIO MODE: instead of sending logged-out visitors to /login, route them

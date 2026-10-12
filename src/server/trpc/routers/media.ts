@@ -3,6 +3,50 @@ import { router, protectedProcedure, assertBrandAccess } from "../index";
 import { TRPCError } from "@trpc/server";
 import { uploadFile, deleteFile } from "@/server/services/drive/client";
 
+// Every media_assets column except `metadata`. The upload thumbnail lives in
+// that JSONB blob as a base64 data URL, so `media_assets(*)` shipped a copy of
+// the image itself for every asset on the page. List views read pixels through
+// the authenticated byte proxy (`/api/media/[assetId]`) instead; `media.get`
+// still returns the full row for single-group screens.
+const ASSET_LIST_COLUMNS =
+  "id, group_id, drive_file_id, processed_drive_file_id, file_name, file_type, file_size, " +
+  "width, height, aspect_ratio, duration_seconds, tagged_platform, tagged_account_id, " +
+  "tagged_action, sort_order, created_at";
+
+/**
+ * Removes an asset's Drive files — both the original and the rendered/edited
+ * copy in `processed_drive_file_id`, which earlier deletes left orphaned in the
+ * user's Drive forever.
+ *
+ * Best effort by design: a file the user already deleted by hand (404), an
+ * expired token or one of two deletes failing must never block removing the
+ * database row.
+ */
+async function deleteAssetDriveFiles(
+  assets: Array<{ drive_file_id?: string | null; processed_drive_file_id?: string | null }>,
+  brandId: string | undefined,
+  orgId: string,
+  label: string
+): Promise<void> {
+  if (!brandId) return;
+
+  // The editor can point both columns at the same rendered file, so dedupe
+  // before deleting to avoid a guaranteed 404 on the second call.
+  const fileIds = new Set<string>();
+  for (const asset of assets) {
+    if (asset.drive_file_id) fileIds.add(asset.drive_file_id);
+    if (asset.processed_drive_file_id) fileIds.add(asset.processed_drive_file_id);
+  }
+
+  for (const fileId of fileIds) {
+    try {
+      await deleteFile(fileId, brandId, orgId);
+    } catch (e) {
+      console.warn(`[${label}] Drive delete failed for ${fileId}:`, e);
+    }
+  }
+}
+
 export const mediaRouter = router({
   // List media groups with pagination
   list: protectedProcedure
@@ -24,11 +68,26 @@ export const mediaRouter = router({
       }
       const offset = (input.page - 1) * input.limit;
 
+      // The media type lives on the assets, so it has to be filtered inside the
+      // query. Filtering the fetched page in JS meant a page of 20 could return
+      // 3 rows while `total` still counted every group, so paging forward
+      // skipped real matches. `type_match` is an inner join used purely as a
+      // predicate (it makes the count respect the filter); the unfiltered embed
+      // beside it keeps every asset of a matching group in the response.
+      const selectClause =
+        input.type === "all"
+          ? `*, media_assets(${ASSET_LIST_COLUMNS})`
+          : `*, type_match:media_assets!inner(id), media_assets(${ASSET_LIST_COLUMNS})`;
+
       let query = db
         .from("media_groups")
-        .select("*, media_assets(*)", { count: "exact" })
+        .select(selectClause, { count: "exact" })
         .order("created_at", { ascending: false })
         .range(offset, offset + input.limit - 1);
+
+      if (input.type !== "all") {
+        query = query.like("type_match.file_type", `${input.type}/%`);
+      }
 
       // Filter by brand based on role
       if (brandId) {
@@ -59,17 +118,12 @@ export const mediaRouter = router({
 
       if (error) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: error.message });
 
-      // Filter by type if specified
-      let groups = data || [];
+      const groups = data || [];
+
+      // Keep the response shape identical to the unfiltered query: the
+      // join-only embed is an implementation detail of the type filter.
       if (input.type !== "all") {
-        groups = groups.filter((g: any) => {
-          const assets = g.media_assets || [];
-          if (assets.length === 0) return true;
-          const firstType = assets[0].file_type || "";
-          return input.type === "image"
-            ? firstType.startsWith("image/")
-            : firstType.startsWith("video/");
-        });
+        for (const group of groups) delete group.type_match;
       }
 
       return {
@@ -242,23 +296,25 @@ export const mediaRouter = router({
       // Get all assets to delete from Drive
       const { data: group } = await db
         .from("media_groups")
-        .select("brand_id, media_assets(drive_file_id)")
+        .select("brand_id, media_assets(drive_file_id, processed_drive_file_id)")
         .eq("id", input.groupId)
         .single();
 
       if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Media group not found" });
       assertBrandAccess(profile, group.brand_id);
 
-      if (group) {
-        // Delete files from Drive (best effort)
-        for (const asset of group.media_assets || []) {
-          try {
-            await deleteFile(asset.drive_file_id, group.brand_id, profile.org_id);
-          } catch {
-            // Continue even if Drive delete fails
-          }
-        }
-      }
+      await deleteAssetDriveFiles(
+        group.media_assets || [],
+        group.brand_id,
+        profile.org_id,
+        "media.deleteGroup"
+      );
+
+      // Clean up any group_imported_reels referencing this group
+      await db
+        .from("group_imported_reels")
+        .delete()
+        .eq("media_group_id", input.groupId);
 
       // Cascade deletes media_assets
       const { error } = await db
@@ -279,19 +335,19 @@ export const mediaRouter = router({
       // Get asset info before deleting
       const { data: asset } = await db
         .from("media_assets")
-        .select("group_id, drive_file_id, group:media_groups(brand_id)")
+        .select("group_id, drive_file_id, processed_drive_file_id, group:media_groups(brand_id)")
         .eq("id", input.assetId)
         .single();
 
       if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Asset not found" });
       assertBrandAccess(profile, asset.group?.brand_id);
 
-      // Delete from Drive
-      try {
-        await deleteFile(asset.drive_file_id, asset.group?.brand_id, profile.org_id);
-      } catch {
-        // Continue
-      }
+      await deleteAssetDriveFiles(
+        [asset],
+        asset.group?.brand_id,
+        profile.org_id,
+        "media.removeVariant"
+      );
 
       // Delete from DB
       await db.from("media_assets").delete().eq("id", input.assetId);

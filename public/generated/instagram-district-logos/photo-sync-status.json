@@ -1,0 +1,958 @@
+{
+  "18ecd33a-a662-444a-a175-60c4b8586ba4": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T21:31:22.000430+00:00"
+  },
+  "apna_amrohaa": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T21:31:22.000430+00:00"
+  },
+  "badalta_agra": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:32:55.305199+00:00"
+  },
+  "agra": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:32:55.305199+00:00"
+  },
+  "481be942-6e9d-4b0c-82af-46b27133686d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:32:55.490Z"
+  },
+  "481be9426e9d4b0c82af46b27133686d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:32:55.490Z"
+  },
+  "badalta_aligarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:02:25.843834+00:00"
+  },
+  "aligarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:02:25.843834+00:00"
+  },
+  "148e2845-2109-49ea-b693-5e6ae7080475": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T22:09:43.418Z"
+  },
+  "148e2845210949eab6935e6ae7080475": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T22:09:43.418Z"
+  },
+  "badalta_ambedkar_nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:01:08.738516+00:00"
+  },
+  "ambedkar nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:01:08.738516+00:00"
+  },
+  "0d7e67d8-c7d4-45c7-94c3-d8306e3ce852": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T22:15:03.610Z"
+  },
+  "0d7e67d8c7d445c794c3d8306e3ce852": {
+    "status": "synced",
+    "syncedAt": "2026-10-01T22:15:03.610Z"
+  },
+  "badalta_amethi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T09:45:46.209759+00:00"
+  },
+  "amethi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T09:45:46.209759+00:00"
+  },
+  "apna_ayodhyaaa": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:14:59.067856+00:00"
+  },
+  "ayodhya": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:14:59.067856+00:00"
+  },
+  "7ace03d7-81e5-4a87-8dd9-176daedc47dd": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:14:59.284Z"
+  },
+  "7ace03d781e54a878dd9176daedc47dd": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:14:59.284Z"
+  },
+  "apna_auraiyaaa": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:41.858810+00:00"
+  },
+  "auraiya": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:41.858810+00:00"
+  },
+  "46313a00-da61-4b59-a057-7bce08ec8b28": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:42.106Z"
+  },
+  "46313a00da614b59a0577bce08ec8b28": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:42.106Z"
+  },
+  "apnaa_baghpat": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:58.639976+00:00"
+  },
+  "baghpat": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:58.639976+00:00"
+  },
+  "a774dc5a-7d37-4056-8171-09511aae539a": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:58.792Z"
+  },
+  "a774dc5a7d374056817109511aae539a": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:16:58.792Z"
+  },
+  "apnaa_bahraich": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:08.479650+00:00"
+  },
+  "bahraich": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:08.479650+00:00"
+  },
+  "6adab674-cf89-4a9d-9179-e7e7e72b910d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:08.637Z"
+  },
+  "6adab674cf894a9d9179e7e7e72b910d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:08.637Z"
+  },
+  "apna_balliaa": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:21.884783+00:00"
+  },
+  "ballia": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:21.884783+00:00"
+  },
+  "5237423b-08fd-4712-b8b4-39c6f36d848b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:22.120Z"
+  },
+  "5237423b08fd4712b8b439c6f36d848b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:22.120Z"
+  },
+  "apna_.banda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:22:28.701380+00:00"
+  },
+  "banda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:22:28.701380+00:00"
+  },
+  "19406691-61f7-429a-9ef2-b572ba9bac29": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:33.559Z"
+  },
+  "1940669161f7429a9ef2b572ba9bac29": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:33.559Z"
+  },
+  "apnaa_barabanki": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:43.537287+00:00"
+  },
+  "barabanki": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:43.537287+00:00"
+  },
+  "13f5a3ac-6593-401e-ba02-fa0871319eb0": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:43.692Z"
+  },
+  "13f5a3ac6593401eba02fa0871319eb0": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:43.692Z"
+  },
+  "apna_bastii": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:53.776378+00:00"
+  },
+  "basti": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:53.776378+00:00"
+  },
+  "4f69bdc7-041e-4eec-9fb3-98fc58a5f2d4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:53.916Z"
+  },
+  "4f69bdc7041e4eec9fb398fc58a5f2d4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:17:53.916Z"
+  },
+  "badalta_bijnor": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:05.145837+00:00"
+  },
+  "bijnor": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:05.145837+00:00"
+  },
+  "215407ae-5d71-4164-924d-6538837cc88b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:05.439Z"
+  },
+  "215407ae5d714164924d6538837cc88b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:05.439Z"
+  },
+  "apnaa_budaun": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:16.560661+00:00"
+  },
+  "budaun": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:16.560661+00:00"
+  },
+  "c9dc8ad7-3c9b-4f81-8d95-67f3d2944f7c": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:16.700Z"
+  },
+  "c9dc8ad73c9b4f818d9567f3d2944f7c": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:16.700Z"
+  },
+  "apnaa_bulandshahar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:26.928787+00:00"
+  },
+  "bulandshahar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:26.928787+00:00"
+  },
+  "d811897f-4f40-42bd-b61c-c098d32e0114": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:27.083Z"
+  },
+  "d811897f4f4042bdb61cc098d32e0114": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:27.083Z"
+  },
+  "apna_chandauliii": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:52.226509+00:00"
+  },
+  "chandauli": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:52.226509+00:00"
+  },
+  "apnaa_chitrakoot": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:55.105049+00:00"
+  },
+  "chitrakoot": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:55.105049+00:00"
+  },
+  "5ee773f7-4247-4bc5-be04-2fe441fd223b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:52.376Z"
+  },
+  "5ee773f742474bc5be042fe441fd223b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:52.376Z"
+  },
+  "565f484e-dcab-4619-ad64-2938553f4c58": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:55.246Z"
+  },
+  "565f484edcab4619ad642938553f4c58": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:18:55.246Z"
+  },
+  "apnaa_deoria": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:05.895113+00:00"
+  },
+  "deoria": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:45:24.118858+00:00"
+  },
+  "edba0df7-5217-44a7-8add-37b25b25a523": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:05.895113+00:00"
+  },
+  "edba0df7521744a78add37b25b25a523": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:05.895113+00:00"
+  },
+  "apnaa_etah": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:20.317205+00:00"
+  },
+  "etah": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:20.317205+00:00"
+  },
+  "2b7538bd-7213-4a4e-bf54-6b5415a8dfc6": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:20.588Z"
+  },
+  "2b7538bd72134a4ebf546b5415a8dfc6": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:20.588Z"
+  },
+  "apnaaa_farrukhabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:28.153930+00:00"
+  },
+  "farrukhabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:28.153930+00:00"
+  },
+  "75edb04f-52b8-4977-b56b-ff39e163724d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:28.336Z"
+  },
+  "75edb04f52b84977b56bff39e163724d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:28.336Z"
+  },
+  "apnaa_fatehpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:38.670289+00:00"
+  },
+  "fatehpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:38.670289+00:00"
+  },
+  "455c54a6-6b8c-4ccf-9886-94417071351b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:38.843Z"
+  },
+  "455c54a66b8c4ccf988694417071351b": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:38.843Z"
+  },
+  "apnaa_firozabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:48.895193+00:00"
+  },
+  "firozabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:48.895193+00:00"
+  },
+  "7a677201-c3b9-4cf0-ad1a-a1e4a000beea": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:49.107Z"
+  },
+  "7a677201c3b94cf0ad1aa1e4a000beea": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:19:49.107Z"
+  },
+  "apnaa_ghaziabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:00.392651+00:00"
+  },
+  "ghaziabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:00.392651+00:00"
+  },
+  "3482a38f-8614-4bbd-808b-787118c0606e": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:00.551Z"
+  },
+  "3482a38f86144bbd808b787118c0606e": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:00.551Z"
+  },
+  "apnaa_gonda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:11.141589+00:00"
+  },
+  "gonda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:11.141589+00:00"
+  },
+  "7f936ba4-646e-485a-9e66-f8c8d5c3c9fc": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:11.319Z"
+  },
+  "7f936ba4646e485a9e66f8c8d5c3c9fc": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:11.319Z"
+  },
+  "apnaa_gautam_buddha_nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:24.014750+00:00"
+  },
+  "gautam buddha nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:24.014750+00:00"
+  },
+  "a0acdca4-46f6-47b0-b4d1-2f03331ce065": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:24.160Z"
+  },
+  "a0acdca446f647b0b4d12f03331ce065": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:24.160Z"
+  },
+  "apnaa_hamirpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:34.961376+00:00"
+  },
+  "hamirpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:20:34.961376+00:00"
+  },
+  "apnaa_hapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:28:32.718870+00:00"
+  },
+  "hapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:28:32.718870+00:00"
+  },
+  "apnaa_hathras": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:52.128576+00:00"
+  },
+  "hathras": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:52.128576+00:00"
+  },
+  "8589a84a-f80d-4122-b475-03dd40092cbb": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:52.297Z"
+  },
+  "8589a84af80d4122b47503dd40092cbb": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:27:52.297Z"
+  },
+  "756070c6-1af5-4c16-b003-01c2224c39d2": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:28:32.944Z"
+  },
+  "756070c61af54c16b00301c2224c39d2": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:28:32.944Z"
+  },
+  "apnaa_jalaun": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:47.903683+00:00"
+  },
+  "jalaun": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:47.903683+00:00"
+  },
+  "bf8acca7-0e1d-4194-b8f7-db9bc2a8e722": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:48.100Z"
+  },
+  "bf8acca70e1d4194b8f7db9bc2a8e722": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:48.100Z"
+  },
+  "apnaa_jaunpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:59.878401+00:00"
+  },
+  "jaunpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:35:59.878401+00:00"
+  },
+  "afc3b473-1f99-4753-9949-c63fed01b083": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:00.029Z"
+  },
+  "afc3b4731f9947539949c63fed01b083": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:00.029Z"
+  },
+  "apnaa_kannauj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:11.411074+00:00"
+  },
+  "kannauj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:11.411074+00:00"
+  },
+  "3a5db391-d4b1-496c-a274-d10146395a41": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:11.623Z"
+  },
+  "3a5db391d4b1496ca274d10146395a41": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:11.623Z"
+  },
+  "apnaa_kanpur_dehat": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:22.578541+00:00"
+  },
+  "kanpur dehat": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:22.578541+00:00"
+  },
+  "e4d34624-3ff8-4c00-9ffa-f02101280fa8": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:22.719Z"
+  },
+  "e4d346243ff84c009ffaf02101280fa8": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:22.719Z"
+  },
+  "apnaa_kanpur_nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:33.091117+00:00"
+  },
+  "kanpur nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:33.091117+00:00"
+  },
+  "6a30b70a-60d4-4c9b-af16-e889ed3405a4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:33.314Z"
+  },
+  "6a30b70a60d44c9baf16e889ed3405a4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:36:33.314Z"
+  },
+  "apnaa._kasganj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:01.801632+00:00"
+  },
+  "kasganj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:01.801632+00:00"
+  },
+  "apnaa._kaushambi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:11.200037+00:00"
+  },
+  "kaushambi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:11.200037+00:00"
+  },
+  "apna._kushinagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:20.398764+00:00"
+  },
+  "kushinagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:20.398764+00:00"
+  },
+  "apnaa_lakhimpur_kheri": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:29.779113+00:00"
+  },
+  "lakhimpur kheri": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:29.779113+00:00"
+  },
+  "apnaa_lalitpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:40.439281+00:00"
+  },
+  "lalitpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:40.439281+00:00"
+  },
+  "apnaa._maharajganj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:50.228624+00:00"
+  },
+  "maharajganj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:44:50.228624+00:00"
+  },
+  "apnaa_mahoba": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:38:50.880388+00:00"
+  },
+  "mahoba": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:38:50.880388+00:00"
+  },
+  "apnaa_mainpuri": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:04.576515+00:00"
+  },
+  "mainpuri": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:04.576515+00:00"
+  },
+  "apna._deoria": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:45:24.118858+00:00"
+  },
+  "apnaa_mau": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:54.704481+00:00"
+  },
+  "mau": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:39:54.704481+00:00"
+  },
+  "apnaa._meerut": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:05.604739+00:00"
+  },
+  "meerut": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:05.604739+00:00"
+  },
+  "apnaa_mirzapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:15.800699+00:00"
+  },
+  "mirzapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:15.800699+00:00"
+  },
+  "badalta_moradabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:24.593258+00:00"
+  },
+  "moradabad": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:24.593258+00:00"
+  },
+  "badalta_muzaffarnagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:35.903362+00:00"
+  },
+  "muzaffarnagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:35.903362+00:00"
+  },
+  "apnaa_pilibhit": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:45.636495+00:00"
+  },
+  "pilibhit": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:45.636495+00:00"
+  },
+  "apnaa_pratapgarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:56.494496+00:00"
+  },
+  "pratapgarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:40:56.494496+00:00"
+  },
+  "apnaa_raebareli": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:06.271648+00:00"
+  },
+  "raebareli": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:06.271648+00:00"
+  },
+  "apna._rampur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:18.591164+00:00"
+  },
+  "rampur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:18.591164+00:00"
+  },
+  "badalta_saharanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:28.653176+00:00"
+  },
+  "saharanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:28.653176+00:00"
+  },
+  "apnaa_sambhal": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:38.698215+00:00"
+  },
+  "sambhal": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:38.698215+00:00"
+  },
+  "apna_varanasii": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:50.031695+00:00"
+  },
+  "varanasi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:50.031695+00:00"
+  },
+  "apnaa_unnao": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:59.977717+00:00"
+  },
+  "unnao": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:41:59.977717+00:00"
+  },
+  "apnaa_sonbhadra": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:35.261517+00:00"
+  },
+  "sonbhadra": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:35.261517+00:00"
+  },
+  "apnaa_sitapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:47.781641+00:00"
+  },
+  "sitapur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:47.781641+00:00"
+  },
+  "apnaa_siddharthnagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:58.168478+00:00"
+  },
+  "siddharthnagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:42:58.168478+00:00"
+  },
+  "apnaa_shravasti": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:08.424369+00:00"
+  },
+  "shravasti": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:08.424369+00:00"
+  },
+  "apna._shahjahanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:42.792003+00:00"
+  },
+  "shahjahanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:42.792003+00:00"
+  },
+  "apnaa_sant_kabir_nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:52.891956+00:00"
+  },
+  "sant kabir nagar": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:43:52.891956+00:00"
+  },
+  "apna._mathura": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:45:37.778358+00:00"
+  },
+  "mathura": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:45:37.778358+00:00"
+  },
+  "apnaaa_azamgarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:48:04.932287+00:00"
+  },
+  "azamgarh": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:48:04.932287+00:00"
+  },
+  "e79eb34b-453b-43b0-8314-d804c7eadcda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:48:05.087Z"
+  },
+  "e79eb34b453b43b08314d804c7eadcda": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:48:05.087Z"
+  },
+  "apna._.balrampur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:52:03.536110+00:00"
+  },
+  "balrampur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:52:03.536110+00:00"
+  },
+  "57eb86c2-3e98-4bc5-b44a-d164724344ca": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:52:03.718Z"
+  },
+  "57eb86c23e984bc5b44ad164724344ca": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:52:03.718Z"
+  },
+  "apna._bareilly": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:56:27.617971+00:00"
+  },
+  "bareilly": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:56:27.617971+00:00"
+  },
+  "f13827d7-fca1-4503-96ad-18a4e6b69ce6": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:56:27.791Z"
+  },
+  "f13827d7fca1450396ad18a4e6b69ce6": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:56:27.791Z"
+  },
+  "apna._bhadohi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:58:32.214098+00:00"
+  },
+  "bhadohi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:58:32.214098+00:00"
+  },
+  "8e51caa8-aac0-41df-a0f7-f23904742db5": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:58:32.445Z"
+  },
+  "8e51caa8aac041dfa0f7f23904742db5": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:58:32.445Z"
+  },
+  "apnaa_etawah": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:59:35.968340+00:00"
+  },
+  "etawah": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:59:35.968340+00:00"
+  },
+  "7a647af2-6c6a-47cd-bf44-719a0bc9b2d4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:59:36.117Z"
+  },
+  "7a647af26c6a47cdbf44719a0bc9b2d4": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T10:59:36.117Z"
+  },
+  "apnaa_ghazipur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:01:05.152554+00:00"
+  },
+  "ghazipur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:01:05.152554+00:00"
+  },
+  "6fab6d53-c59b-4655-8ea0-463e6ec9353d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:01:05.345Z"
+  },
+  "6fab6d53c59b46558ea0463e6ec9353d": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:01:05.345Z"
+  },
+  "apnaa._gorakhpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:05:28.373990+00:00"
+  },
+  "gorakhpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:05:28.373990+00:00"
+  },
+  "acbbb926-ed82-40ea-b088-316697f3c554": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:05:28.520Z"
+  },
+  "acbbb926ed8240eab088316697f3c554": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:05:28.520Z"
+  },
+  "apna_hardoii": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:06:45.606312+00:00"
+  },
+  "hardoi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:06:45.606312+00:00"
+  },
+  "997d278f-3adc-4797-8471-a7b2712ea450": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:06:45.790Z"
+  },
+  "997d278f3adc47978471a7b2712ea450": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:06:45.790Z"
+  },
+  "apna._.sultanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:12:31.894822+00:00"
+  },
+  "sultanpur": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:12:31.894822+00:00"
+  },
+  "9e04ed55-6af7-49a7-824f-a3881ba92f49": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:12:32.252Z"
+  },
+  "9e04ed556af749a7824fa3881ba92f49": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:12:32.252Z"
+  },
+  "badalta_shamli": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:13:36.701882+00:00"
+  },
+  "shamli": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:13:36.701882+00:00"
+  },
+  "7258d54b-4af7-4cd0-8e7b-16a7ddd752be": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:13:36.875Z"
+  },
+  "7258d54b4af74cd08e7b16a7ddd752be": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:13:36.875Z"
+  },
+  "apnaa._prayagraj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:15:20.882856+00:00"
+  },
+  "prayagraj": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:15:20.882856+00:00"
+  },
+  "a1274330-acd9-47b6-8d56-fd84e5ec50b2": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:15:21.096Z"
+  },
+  "a1274330acd947b68d56fd84e5ec50b2": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:15:21.096Z"
+  },
+  "apnaa_jhansi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:06.955228+00:00"
+  },
+  "jhansi": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:06.955228+00:00"
+  },
+  "61387ce7-a6de-4f74-b99f-1d924d7645ed": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:07.111Z"
+  },
+  "61387ce7a6de4f74b99f1d924d7645ed": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:07.111Z"
+  },
+  "apnaa._lucknow": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:12.393177+00:00"
+  },
+  "lucknow": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:12.393177+00:00"
+  },
+  "19b4a784-851f-4b3c-8a51-4429b408c580": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:12.548Z"
+  },
+  "19b4a784851f4b3c8a514429b408c580": {
+    "status": "synced",
+    "syncedAt": "2026-10-02T11:18:12.548Z"
+  }
+}

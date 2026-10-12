@@ -39,6 +39,15 @@ import {
 type Tab = "harvest" | "results" | "history";
 type RunStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
 
+const DELTA_BUCKETS = [
+  { label: "Under 10", min: 1, max: 9 },
+  { label: "10–19", min: 10, max: 19 },
+  { label: "20–29", min: 20, max: 29 },
+  { label: "30–49", min: 30, max: 49 },
+  { label: "50–99", min: 50, max: 99 },
+  { label: "100+", min: 100, max: Number.MAX_SAFE_INTEGER },
+] as const;
+
 /** Measured harvest throughput — the ETA on the Harvest tab is derived from this. */
 const THROUGHPUT_PER_SEC = 42;
 const PAGE_SIZE = 50;
@@ -139,10 +148,12 @@ export default function InstagramCommentsPage() {
 
   // Harvest inputs
   const [username, setUsername] = useState("");
+  const [savedUsername, setSavedUsername] = useState("");
   const [postLimit, setPostLimit] = useState(24);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [concurrency, setConcurrency] = useState(5);
-  const [includeReplies, setIncludeReplies] = useState(false);
+  const [concurrency, setConcurrency] = useState(3);
+  const [includeReplies, setIncludeReplies] = useState(true);
+  const [driveBrandId, setDriveBrandId] = useState("");
 
   // Results state
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -153,13 +164,22 @@ export default function InstagramCommentsPage() {
 
   const utils = trpc.useUtils();
   const capabilities = trpc.instaComments.capabilities.useQuery();
+  const exportDestinations = trpc.instaComments.exportDestinations.useQuery();
+
+  useEffect(() => {
+    if (!driveBrandId && exportDestinations.data?.[0]?.brandId) {
+      setDriveBrandId(exportDestinations.data[0].brandId);
+    }
+  }, [driveBrandId, exportDestinations.data]);
 
   const postsMutation = trpc.instaComments.listPosts.useMutation({
     onSuccess: (data: any) => {
       setSelected(new Set());
+      setSavedUsername(data.profile.username);
+      utils.instaComments.listSavedMedia.invalidate({ username: data.profile.username, limit: 200 });
       toast.success(
         data.posts.length > 0
-          ? `Loaded ${data.posts.length} post${data.posts.length === 1 ? "" : "s"} for @${data.profile.username}`
+          ? `Saved ${data.saved ?? data.posts.length} links. Comments can now be collected separately.`
           : "Profile loaded but no posts came back — the session may be stale",
       );
     },
@@ -231,7 +251,28 @@ export default function InstagramCommentsPage() {
     onError: (e: any) => toast.error(e.message),
   });
 
-  const posts: any[] = postsMutation.data?.posts ?? [];
+  const retryMutation = trpc.instaComments.retryRun.useMutation({
+    onSuccess: (data: any) => {
+      if (!data.runId) { toast.info("No posts match that retry gap."); return; }
+      setActiveRunId(data.runId);
+      setPolling(true);
+      toast.success(`Retrying ${data.total} post${data.total === 1 ? "" : "s"}; earlier comments stay merged.`);
+      utils.instaComments.getRun.invalidate({ id: data.runId });
+      utils.instaComments.listRuns.invalidate();
+    },
+    onError: (e: any) => toast.error(e.message),
+  });
+
+  const savedMediaQuery = trpc.instaComments.listSavedMedia.useQuery(
+    { username: savedUsername || "_", limit: 200 },
+    { enabled: Boolean(savedUsername) },
+  );
+  const loadedPosts: any[] = postsMutation.data?.posts ?? [];
+  const savedPosts: any[] = savedMediaQuery.data ?? [];
+  // Fresh discovery has the newest profile metadata. Once the page is
+  // refreshed, the durable link workspace is still selectable without asking
+  // Instagram for the feed a second time.
+  const posts: any[] = loadedPosts.length ? loadedPosts : savedPosts;
   const profile: any = postsMutation.data?.profile;
 
   const selectedPosts = useMemo(() => posts.filter((p) => selected.has(p.mediaId)), [posts, selected]);
@@ -279,6 +320,16 @@ export default function InstagramCommentsPage() {
     postsMutation.mutate({ username: handle, limit: postLimit });
   };
 
+  const loadSavedPosts = () => {
+    const handle = username.trim().replace(/^@/, "");
+    if (!handle) {
+      toast.error("Enter an Instagram username first");
+      return;
+    }
+    setSelected(new Set());
+    setSavedUsername(handle);
+  };
+
   const startHarvest = () => {
     if (!selectedPosts.length) {
       toast.error("Select at least one post");
@@ -289,6 +340,7 @@ export default function InstagramCommentsPage() {
       mediaIds: selectedPosts.map((p) => p.mediaId as string),
       concurrency,
       includeReplies,
+      driveBrandId: driveBrandId || undefined,
     });
   };
 
@@ -316,7 +368,7 @@ export default function InstagramCommentsPage() {
   };
 
   const caps = capabilities.data;
-  const perPost: Record<string, number> = run?.progress?.perPost ?? {};
+  const perPostDetails: Record<string, any> = run?.progress?.perPost ?? {};
   const commentRows: any[] = commentsQuery.data?.rows ?? [];
   const commentTotal = commentsQuery.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(commentTotal / PAGE_SIZE));
@@ -391,8 +443,15 @@ export default function InstagramCommentsPage() {
                         <Loader2 className="h-4 w-4 animate-spin" /> Loading
                       </>
                     ) : (
-                      "Load posts"
+                      "Discover & save links"
                     )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={loadSavedPosts}
+                    disabled={savedMediaQuery.isFetching}
+                  >
+                    {savedMediaQuery.isFetching ? "Loading saved links" : "Load saved links"}
                   </Button>
                 </div>
               </div>
@@ -430,9 +489,10 @@ export default function InstagramCommentsPage() {
           {posts.length > 0 && (
             <Card>
               <CardContent className="py-4 space-y-4">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
+                <div className="max-h-[500px] overflow-auto rounded-md border shadow-2xs">
+                  <Table>
+                    <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur shadow-xs">
+                      <TableRow className="bg-muted/70 hover:bg-muted/70">
                       <TableHead className="w-10">
                         <Checkbox checked={allSelected} onCheckedChange={toggleAll} />
                       </TableHead>
@@ -440,7 +500,8 @@ export default function InstagramCommentsPage() {
                       <TableHead>Kind</TableHead>
                       <TableHead>Published</TableHead>
                       <TableHead className="text-right">Likes</TableHead>
-                      <TableHead className="text-right">Comments</TableHead>
+                      <TableHead className="text-right">Reported</TableHead>
+                      <TableHead className="text-right">Saved</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -483,10 +544,14 @@ export default function InstagramCommentsPage() {
                         <TableCell className="text-right tabular-nums">
                           {fmt(post.commentCount)}
                         </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {typeof post.scrapedCount === "number" ? fmt(post.scrapedCount) : "—"}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
+              </div>
 
                 <div className="flex flex-wrap items-end justify-between gap-4 border-t pt-4">
                   <div className="flex flex-wrap items-end gap-4">
@@ -498,7 +563,7 @@ export default function InstagramCommentsPage() {
                         max={8}
                         value={concurrency}
                         onChange={(e) =>
-                          setConcurrency(Math.min(8, Math.max(1, Number(e.target.value) || 1)))
+                          setConcurrency(Math.min(5, Math.max(1, Number(e.target.value) || 1)))
                         }
                         className="w-24"
                       />
@@ -507,6 +572,24 @@ export default function InstagramCommentsPage() {
                       <Switch checked={includeReplies} onCheckedChange={setIncludeReplies} />
                       <Label className="text-xs">Include replies</Label>
                     </div>
+                    {exportDestinations.data?.length ? (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Drive CSV destination</Label>
+                        <select
+                          value={driveBrandId}
+                          onChange={(event) => setDriveBrandId(event.target.value)}
+                          className="h-9 max-w-48 rounded-md border bg-background px-2 text-xs"
+                        >
+                          {exportDestinations.data.map((destination: { brandId: string; brandName: string }) => (
+                            <option key={destination.brandId} value={destination.brandId}>
+                              {destination.brandName} · Instagram scraper
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <p className="pb-2 text-xs text-muted-foreground">Connect Google Drive to save run CSVs.</p>
+                    )}
                   </div>
 
                   <div className="space-y-1.5 text-right">
@@ -515,7 +598,7 @@ export default function InstagramCommentsPage() {
                       {fmt(selectedCommentTotal)} comments
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      ETA {etaLabel(selectedCommentTotal)} at {THROUGHPUT_PER_SEC}/sec
+                      Links are saved first. ETA {etaLabel(selectedCommentTotal)} at {THROUGHPUT_PER_SEC}/sec
                     </p>
                   </div>
 
@@ -528,7 +611,7 @@ export default function InstagramCommentsPage() {
                         <Loader2 className="h-4 w-4 animate-spin" /> Starting
                       </>
                     ) : (
-                      "Start harvest"
+                      "Collect comments from saved links"
                     )}
                   </Button>
                 </div>
@@ -633,29 +716,69 @@ export default function InstagramCommentsPage() {
                   </p>
                 )}
 
-                {Object.keys(perPost).length > 0 && (
+                {Object.keys(perPostDetails).length > 0 && (
                   <div className="space-y-2 border-t pt-4">
                     <p className="text-xs font-medium text-muted-foreground">
                       Per-post progress
                       {run.progress?.updatedAt && ` · updated ${timeAgo(run.progress.updatedAt)}`}
                     </p>
                     <div className="space-y-1.5">
-                      {Object.entries(perPost).map(([mediaId, count]) => {
-                        const expected = commentCountById.get(mediaId) ?? 0;
+                      {Object.entries(perPostDetails).map(([mediaId, raw]) => {
+                        const legacyCount = typeof raw === "number" ? raw : 0;
+                        const detail = typeof raw === "number" ? { reportedCount: commentCountById.get(mediaId) ?? 0, scrapedCount: raw, topLevelCount: raw, replyCount: 0, status: "partial" } : raw;
+                        const expected = typeof detail.reportedCount === "number" ? detail.reportedCount : commentCountById.get(mediaId) ?? 0;
+                        const scraped = typeof detail.scrapedCount === "number" ? detail.scrapedCount : legacyCount;
+                        const delta = Math.max(0, expected - scraped);
                         return (
-                          <div key={mediaId} className="flex items-center gap-3">
+                          <div key={mediaId} className="flex flex-wrap items-center gap-3 rounded-md border px-2 py-1.5">
                             <span className="w-28 shrink-0 truncate font-mono text-xs">
                               {shortcodeById.get(mediaId) ?? mediaId}
                             </span>
                             <ProgressBar
-                              pct={expected > 0 ? (count / expected) * 100 : count > 0 ? 100 : 0}
+                              pct={expected > 0 ? (scraped / expected) * 100 : scraped > 0 ? 100 : 0}
                               className="flex-1"
                             />
-                            <span className="w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-                              {fmt(count)}
-                              {expected > 0 ? ` / ${fmt(expected)}` : ""}
+                            <span className="w-28 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                              {fmt(scraped)} / {fmt(expected)}
                             </span>
+                            <span className={"w-24 shrink-0 text-right text-xs tabular-nums " + (delta > 0 ? "text-destructive" : "text-emerald-700")}>
+                              Δ {fmt(delta)}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                              {fmt(detail.topLevelCount ?? scraped)} top · {fmt(detail.replyCount ?? 0)} replies
+                            </span>
+                            {settled && delta > 0 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => retryMutation.mutate({ runId: run.id, postIds: [mediaId] })}
+                                disabled={retryMutation.isPending}
+                              >
+                                Retry comments
+                              </Button>
+                            )}
                           </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {settled && Object.keys(perPostDetails).length > 0 && (
+                  <div className="space-y-2 border-t pt-4">
+                    <p className="text-xs font-medium text-muted-foreground">Retry incomplete comments by delta</p>
+                    <div className="flex flex-wrap gap-2">
+                      {DELTA_BUCKETS.map((bucket) => {
+                        const matching = Object.entries(perPostDetails).filter(([mediaId, raw]) => {
+                          const detail = typeof raw === "number" ? { reportedCount: commentCountById.get(mediaId) ?? 0, scrapedCount: raw } : raw as any;
+                          return Math.max(0, (detail.reportedCount ?? commentCountById.get(mediaId) ?? 0) - (detail.scrapedCount ?? 0)) >= bucket.min
+                            && Math.max(0, (detail.reportedCount ?? commentCountById.get(mediaId) ?? 0) - (detail.scrapedCount ?? 0)) <= bucket.max;
+                        }).length;
+                        return (
+                          <Button key={bucket.label} variant="outline" size="sm" disabled={!matching || retryMutation.isPending}
+                            onClick={() => retryMutation.mutate({ runId: run.id, minDelta: bucket.min, maxDelta: bucket.max })}>
+                            Retry {bucket.label} ({matching})
+                          </Button>
                         );
                       })}
                     </div>
@@ -684,55 +807,57 @@ export default function InstagramCommentsPage() {
                   </p>
                 </div>
 
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Commenter</TableHead>
-                      <TableHead className="w-1/2">Comment</TableHead>
-                      <TableHead>Post</TableHead>
-                      <TableHead className="text-right">Likes</TableHead>
-                      <TableHead>When</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {commentRows.map((row) => (
-                      <TableRow key={row.comment_id}>
-                        <TableCell className="align-top">
-                          <div style={{ marginLeft: (row.depth ?? 0) * 14 }} className="space-y-0.5">
-                            <p className="flex items-center gap-1.5 text-xs font-mono">
-                              @{row.commenter_username}
-                              {row.commenter_verified && (
-                                <Badge variant="secondary" className="text-[10px]">
-                                  ✓
-                                </Badge>
-                              )}
-                            </p>
-                            {row.commenter_full_name && (
-                              <p className="text-[11px] text-muted-foreground">
-                                {row.commenter_full_name}
-                              </p>
-                            )}
-                            {row.parent_comment_id && (
-                              <span className="text-[10px] text-muted-foreground">reply</span>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell className="align-top whitespace-pre-wrap text-sm">
-                          {row.comment_text}
-                        </TableCell>
-                        <TableCell className="align-top font-mono text-xs text-muted-foreground">
-                          {row.post_shortcode}
-                        </TableCell>
-                        <TableCell className="align-top text-right tabular-nums">
-                          {fmt(row.comment_likes)}
-                        </TableCell>
-                        <TableCell className="align-top text-xs text-muted-foreground">
-                          {timeAgo(row.comment_created_at)}
-                        </TableCell>
+                <div className="max-h-[500px] overflow-auto rounded-md border shadow-2xs">
+                  <Table>
+                    <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur shadow-xs">
+                      <TableRow className="bg-muted/70 hover:bg-muted/70">
+                        <TableHead>Commenter</TableHead>
+                        <TableHead className="w-1/2">Comment</TableHead>
+                        <TableHead>Post</TableHead>
+                        <TableHead className="text-right">Likes</TableHead>
+                        <TableHead>When</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {commentRows.map((row) => (
+                        <TableRow key={row.comment_id}>
+                          <TableCell className="align-top">
+                            <div style={{ marginLeft: (row.depth ?? 0) * 14 }} className="space-y-0.5">
+                              <p className="flex items-center gap-1.5 text-xs font-mono">
+                                @{row.commenter_username}
+                                {row.commenter_verified && (
+                                  <Badge variant="secondary" className="text-[10px]">
+                                    ✓
+                                  </Badge>
+                                )}
+                              </p>
+                              {row.commenter_full_name && (
+                                <p className="text-[11px] text-muted-foreground">
+                                  {row.commenter_full_name}
+                                </p>
+                              )}
+                              {row.parent_comment_id && (
+                                <span className="text-[10px] text-muted-foreground">reply</span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top whitespace-pre-wrap text-sm">
+                            {row.comment_text}
+                          </TableCell>
+                          <TableCell className="align-top font-mono text-xs text-muted-foreground">
+                            {row.post_shortcode}
+                          </TableCell>
+                          <TableCell className="align-top text-right tabular-nums">
+                            {fmt(row.comment_likes)}
+                          </TableCell>
+                          <TableCell className="align-top text-xs text-muted-foreground">
+                            {timeAgo(row.comment_created_at)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
 
                 {commentRows.length === 0 && (
                   <p className="text-sm text-muted-foreground">

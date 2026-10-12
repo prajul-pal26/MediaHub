@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 
 // LOCAL DEMO CONVENIENCE: "Enter the studio" signs the visitor straight into the
 // dashboard as the local admin — no login screen. For a hosted deploy, replace
@@ -52,12 +53,32 @@ export async function GET(request: NextRequest) {
     },
   );
 
-  const email = process.env.DEMO_ADMIN_EMAIL || "admin@mediahub.local";
-  const password = process.env.DEMO_ADMIN_PASSWORD || "admin123";
+  const email = process.env.DEMO_ADMIN_EMAIL || process.env.ADMIN_EMAIL || "admin@mediahub.local";
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) {
-    return redirectTo("/login");
+  if (serviceRoleKey) {
+    const admin = createClient(INTERNAL_SUPABASE_URL, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { fetch: serverFetch },
+    });
+    const { data, error } = await admin.auth.admin.generateLink({
+      type: "magiclink",
+      email,
+    });
+
+    const tokenHash = data?.properties?.hashed_token;
+    if (!error && tokenHash) {
+      const { error: verifyError } = await supabase.auth.verifyOtp({
+        type: "magiclink",
+        token_hash: tokenHash,
+      });
+      if (!verifyError) return response;
+    }
   }
+
+  const password = process.env.DEMO_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || "admin123";
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) return redirectTo("/login");
+
   return response;
 }

@@ -1611,20 +1611,28 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
   getAnalyticsTimeSeries: protectedProcedure
     .input(z.object({
       brandId: z.string().uuid(),
-      period: z.enum(["7d", "30d", "90d"]).default("30d"),
+      startDate: z.string().optional(), // YYYY-MM-DD (inclusive)
+      endDate: z.string().optional(),   // YYYY-MM-DD (inclusive)
     }))
     .query(async ({ ctx, input }) => {
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
-      const days = input.period === "7d" ? 7 : input.period === "30d" ? 30 : 90;
-      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      // Lower bound for the history RPC: the chosen start, else 30 days back.
+      const since = input.startDate
+        ? `${input.startDate}T00:00:00.000Z`
+        : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const untilIso = input.endDate ? `${input.endDate}T23:59:59.999Z` : null;
 
       // Use RPC to get history with JOINs (avoids 414 URI Too Long)
-      const { data: history } = await db.rpc("get_brand_analytics_history", {
+      const { data: historyRaw } = await db.rpc("get_brand_analytics_history", {
         p_brand_id: input.brandId,
         p_since: since,
       });
+      // The RPC only bounds the start; apply the end bound here.
+      const history = untilIso
+        ? ((historyRaw || []) as any[]).filter((h) => h.snapshot_at <= untilIso)
+        : historyRaw;
 
       if (!history || history.length === 0) {
         // Fall back to current analytics via RPC
@@ -1796,14 +1804,32 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
   // ━━━ Analytics Summary (for overview page) ━━━
 
   getSummary: protectedProcedure
-    .input(z.object({ brandId: z.string().uuid() }))
+    .input(z.object({
+      brandId: z.string().uuid(),
+      startDate: z.string().optional(), // YYYY-MM-DD (inclusive)
+      endDate: z.string().optional(),   // YYYY-MM-DD (inclusive)
+    }))
     .query(async ({ ctx, input }) => {
       const { db, profile } = ctx;
       assertBrandAccess(profile, input.brandId);
 
       // Use RPC function to do the JOIN server-side (avoids 414 URI Too Long)
       const { data: all } = await db.rpc("get_brand_analytics", { p_brand_id: input.brandId });
-      const rows = (all || []) as any[];
+      let rows = (all || []) as any[];
+
+      // Optional date range: restrict to posts PUBLISHED within [startDate, endDate].
+      if (input.startDate || input.endDate) {
+        let q = db
+          .from("content_posts")
+          .select("id")
+          .eq("brand_id", input.brandId)
+          .in("status", ["published", "partial_published"]);
+        if (input.startDate) q = q.gte("published_at", `${input.startDate}T00:00:00.000Z`);
+        if (input.endDate) q = q.lte("published_at", `${input.endDate}T23:59:59.999Z`);
+        const { data: scopedPosts } = await q;
+        const allowed = new Set((scopedPosts || []).map((p: any) => p.id));
+        rows = rows.filter((r) => allowed.has(r.post_id));
+      }
 
       // Group by platform
       const platformMap: Record<string, any[]> = {};
@@ -1865,7 +1891,7 @@ Tags: ${(group.tags || []).join(", ") || "none"}`;
         };
       }
 
-      const total = aggregate(all);
+      const total = aggregate(rows);
       const byPlatform: Record<string, ReturnType<typeof aggregate>> = {};
       for (const [platform, items] of Object.entries(platformMap)) {
         byPlatform[platform] = aggregate(items);

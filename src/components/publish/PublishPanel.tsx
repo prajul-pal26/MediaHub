@@ -149,6 +149,13 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
     });
   }
 
+  function selectAllAccountsForAction(action: string, accountIds: string[]) {
+    setSelectedAccountsByAction((prev) => ({
+      ...prev,
+      [action]: Array.from(new Set([...(prev[action] || []), ...accountIds])),
+    }));
+  }
+
   function updateJobContent(action: string, accountId: string, field: string, value: string) {
     const key = `${action}::${accountId}`;
     setJobContents((prev) => ({
@@ -365,11 +372,30 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
             if (!rule) return null;
             const actionAccounts = accounts[rule.platform] || [];
             const selected = selectedAccountsByAction[actionKey] || [];
+            const selectableAccountIds = actionAccounts
+              .filter((acc: { id: string }) => !isAlreadyDone(actionKey, acc.id))
+              .map((acc: { id: string }) => acc.id);
+            const allSelectableSelected = selectableAccountIds.length > 0
+              && selectableAccountIds.every((id: string) => selected.includes(id));
 
             return (
               <Card key={actionKey}>
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base">{rule.label}</CardTitle>
+                  <div className="flex items-center justify-between gap-3">
+                    <CardTitle className="text-base">{rule.label}</CardTitle>
+                    {selectableAccountIds.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => selectAllAccountsForAction(actionKey, selectableAccountIds)}
+                        disabled={allSelectableSelected}
+                        className="h-8 px-3 text-xs"
+                      >
+                        All
+                      </Button>
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <p className="text-xs text-muted-foreground mb-3">Select accounts to publish to:</p>
@@ -425,7 +451,7 @@ export function PublishPanel({ group, accounts, previousJobs = [] }: PublishPane
             const custom = jobContents[key];
             const showTitle = job.action.startsWith("yt_") || job.action === "li_article";
             const showDescription = job.action.startsWith("yt_") || job.action === "li_article";
-            const isStory = job.action === "ig_story" || job.action === "fb_story" || job.action === "sc_story";
+            const isStory = (job.action as string) === "ig_story" || (job.action as string) === "fb_story" || (job.action as string) === "sc_story";
 
             return (
               <Card key={key}>

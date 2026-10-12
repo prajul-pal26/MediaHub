@@ -10,6 +10,6 @@ export const config = {
   // running the session middleware on body-carrying POSTs (e.g. /api/upload
   // multipart) corrupts the request body → "Failed to parse body as FormData".
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|mp4|webm)$).*)",
   ],
 };

@@ -96,6 +96,10 @@ export async function POST(request: NextRequest) {
   const ALLOWED_MIME_TYPES = new Set([
     "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif",
     "video/mp4", "video/quicktime", "video/webm", "video/x-msvideo",
+    // Audio: the editor's reusable audio library (audio_tracks) is populated
+    // through this same endpoint.  Audio has no dimensions, so the metadata
+    // branches below leave width/height/aspect_ratio null, which is correct.
+    "audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-m4a", "audio/ogg",
   ]);
   const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500MB
 
@@ -128,7 +132,7 @@ export async function POST(request: NextRequest) {
     // File type whitelist
     if (!ALLOWED_MIME_TYPES.has(file.type)) {
       return NextResponse.json(
-        { error: `File type '${file.type}' is not allowed. Accepted: images (JPEG, PNG, GIF, WebP, HEIC) and videos (MP4, MOV, WebM, AVI).` },
+        { error: `File type '${file.type}' is not allowed. Accepted: images (JPEG, PNG, GIF, WebP, HEIC), videos (MP4, MOV, WebM, AVI) and audio (MP3, M4A/AAC, WAV, OGG).` },
         { status: 400 }
       );
     }

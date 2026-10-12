@@ -4,7 +4,6 @@ import { TRPCError } from "@trpc/server";
 import { encrypt, decrypt } from "@/lib/encryption";
 import { createHmac, randomBytes, createHash } from "crypto";
 import { getRedis } from "@/lib/redis";
-import { getHistoricalImportQueue, getCommentSyncQueue } from "@/server/queue/queues";
 import { isGodUser } from "@/lib/god";
 
 const platformSchema = z.enum(["instagram", "youtube", "linkedin", "facebook", "tiktok", "twitter", "snapchat"]);
@@ -115,7 +114,7 @@ export const socialAccountsRouter = router({
           url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("openid profile w_member_social")}&state=${encodeURIComponent(state)}`;
           break;
         case "facebook":
-          url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=pages_manage_posts,pages_read_engagement,pages_manage_engagement,pages_show_list,business_management,read_insights&response_type=code&auth_type=rerequest&state=${encodeURIComponent(state)}`;
+          url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=pages_manage_posts,pages_read_engagement,pages_manage_engagement,pages_show_list,business_management,read_insights,instagram_basic,instagram_manage_comments,instagram_manage_insights,instagram_content_publish,instagram_manage_messages,pages_messaging&response_type=code&auth_type=rerequest&state=${encodeURIComponent(state)}`;
           break;
         case "tiktok":
           url = `https://www.tiktok.com/v2/auth/authorize/?client_key=${clientId}&scope=user.info.basic,video.publish,video.upload,comment.list,comment.list.manage&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
@@ -342,6 +341,136 @@ export const socialAccountsRouter = router({
       }
 
       return { healthy: true };
+    }),
+
+  /**
+   * Bulk token health for every Instagram account on a brand.
+   *
+   * `checkHealth` only looks at `is_active` and `token_expires_at`, which misses
+   * the failure that actually matters: a token that is unexpired and marked
+   * active but which Instagram now rejects. That happens when the account is
+   * checkpointed, disabled, or its password changed — ten accounts were in this
+   * state while the UI showed them all green, because "connected" was derived
+   * from a row existing rather than from the token working.
+   *
+   * Derived from the most RECENT publish job per account, so an account that
+   * failed and later succeeded correctly reads as healthy again. One query for
+   * the whole brand — a live API probe per account would be 76 round trips.
+   */
+  tokenHealth: protectedProcedure
+    .input(z.object({ brandId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { db, profile } = ctx;
+      assertBrandAccess(profile, input.brandId);
+
+      const { data: accounts } = await db
+        .from("social_accounts")
+        // platform_user_id is required: the live probe builds its URL from it.
+        .select("id, platform_username, platform_user_id, is_active, token_expires_at")
+        .eq("brand_id", input.brandId)
+        .eq("platform", "instagram")
+        .eq("is_active", true);
+
+      const ids = (accounts ?? []).map((a: any) => a.id);
+      if (ids.length === 0) return [];
+
+      // Most recent job per account. Ordered newest-first so the first row seen
+      // for an account is its latest outcome.
+      const { data: jobs } = await db
+        .from("publish_jobs")
+        .select("social_account_id, status, error_message, updated_at")
+        .in("social_account_id", ids)
+        .order("updated_at", { ascending: false });
+
+      const latest = new Map<string, any>();
+      for (const j of (jobs ?? []) as any[]) {
+        if (!latest.has(j.social_account_id)) latest.set(j.social_account_id, j);
+      }
+
+      function classify(msg: string | null): { needsReconnect: boolean; reason: string } {
+        const m = (msg || "").toLowerCase();
+        if (!m.includes("access token") && !m.includes("session")) {
+          return { needsReconnect: false, reason: "" };
+        }
+        // Order matters: the disabled case also mentions "session".
+        if (m.includes("malformed") || m.includes("invalid user id")) {
+          return { needsReconnect: true, reason: "Account disabled or deleted by Instagram" };
+        }
+        if (m.includes("cannot access the app")) {
+          return { needsReconnect: true, reason: "Checkpoint — log in at instagram.com first" };
+        }
+        if (m.includes("changed their password")) {
+          return { needsReconnect: true, reason: "Password changed — just reconnect" };
+        }
+        return { needsReconnect: true, reason: "Token rejected by Instagram" };
+      }
+
+      // Job history only identifies SUSPECTS. It cannot tell whether the user
+      // has since reconnected, because `social_accounts` has no updated_at and
+      // a reconnect creates no new job — so a repaired account would stay
+      // flagged forever. Verify the suspects against Instagram directly.
+      //
+      // Only the suspects, never all 76: a live probe per account would be
+      // dozens of round trips on every page load. In practice this is a handful.
+      const suspects = (accounts ?? []).filter((a: any) => {
+        const job = latest.get(a.id);
+        return classify(job?.error_message ?? null).needsReconnect;
+      });
+
+      // Bound the live work. If something systemic fails everything at once we
+      // report from history rather than making 76 blocking calls.
+      const PROBE_LIMIT = 25;
+      const probed = new Map<string, boolean>();
+      if (suspects.length <= PROBE_LIMIT) {
+        const { decrypt } = await import("@/lib/encryption");
+        await Promise.all(
+          suspects.map(async (a: any) => {
+            try {
+              const { data: full } = await db
+                .from("social_accounts")
+                .select("access_token_encrypted, platform_metadata")
+                .eq("id", a.id)
+                .single();
+              const pageTok = (full as any)?.platform_metadata?.page_access_token_encrypted;
+              const token = decrypt(pageTok || (full as any)?.access_token_encrypted);
+              const base = pageTok
+                ? "https://graph.facebook.com/v19.0"
+                : "https://graph.instagram.com/v21.0";
+              const res = await fetch(
+                `${base}/${a.platform_user_id}?fields=id&access_token=${encodeURIComponent(token)}`
+              );
+              const body: any = await res.json();
+              probed.set(a.id, !body?.error);
+            } catch {
+              // Network blip — fall back to history rather than clearing a
+              // genuine failure on a transient error.
+              probed.set(a.id, false);
+            }
+          })
+        );
+      }
+
+      return (accounts ?? []).map((a: any) => {
+        const job = latest.get(a.id);
+        const fromHistory = classify(job?.error_message ?? null);
+        // A successful live probe means the user already reconnected it.
+        const liveOk = probed.get(a.id);
+        const needsReconnect = liveOk === true ? false : fromHistory.needsReconnect;
+        const expired =
+          a.token_expires_at && new Date(a.token_expires_at) < new Date();
+        return {
+          accountId: a.id,
+          username: a.platform_username as string | null,
+          needsReconnect: needsReconnect || Boolean(expired),
+          reason:
+            expired && !needsReconnect
+              ? "Token expired"
+              : needsReconnect
+                ? fromHistory.reason
+                : "",
+          lastFailureAt: needsReconnect ? job?.updated_at ?? null : null,
+        };
+      });
     }),
 
   refreshToken: protectedProcedure
@@ -590,13 +719,6 @@ export const socialAccountsRouter = router({
 
           connected.push(existing.id);
 
-          // Queue jobs for reconnected account
-          try {
-            const queue = getHistoricalImportQueue();
-            await queue.add(`historical-${platform}-${data.brandId}`, {
-              accountId: existing.id, brandId: data.brandId, orgId: data.orgId, platform,
-            });
-          } catch {}
         } else {
           const { data: newAccount } = await db.from("social_accounts").insert({
             brand_id: data.brandId,
@@ -611,26 +733,8 @@ export const socialAccountsRouter = router({
             is_active: true,
           }).select("id").single();
 
-          if (newAccount) {
-            connected.push(newAccount.id);
-
-            // Queue jobs for new account
-            try {
-              const queue = getHistoricalImportQueue();
-              await queue.add(`historical-${platform}-${data.brandId}`, {
-                accountId: newAccount.id, brandId: data.brandId, orgId: data.orgId, platform,
-              });
-            } catch {}
-          }
+          if (newAccount) connected.push(newAccount.id);
         }
-
-        // Queue comment sync
-        try {
-          const commentSyncQueue = getCommentSyncQueue();
-          await commentSyncQueue.add(`comment-sync-${platform}-${data.brandId}`, {
-            brandId: data.brandId,
-          });
-        } catch {}
       }
 
       // Clean up Redis

@@ -10,15 +10,19 @@ import { publishRouter } from "./routers/publish";
 import { jobsRouter } from "./routers/jobs";
 import { socialAccountsRouter } from "./routers/social-accounts";
 import { invitationsRouter } from "./routers/invitations";
-import { chatRouter } from "./routers/chat";
 import { llmRouter } from "./routers/llm";
 import { analyticsRouter } from "./routers/analytics";
-import { threadsRouter } from "./routers/threads";
 import { instaFetcherRouter } from "./routers/insta-fetcher";
 import { fbFetcherRouter } from "./routers/fb-fetcher";
 import { fbSessionRouter } from "./routers/fb-session";
 import { fbScraperRouter } from "./routers/fb-scraper";
 import { instaCommentsRouter } from "./routers/insta-comments";
+import { fbSessionBridgeRouter } from "./routers/fb-session-bridge";
+import { fbProfileLibraryRouter } from "./routers/fb-profile-library";
+import { instaProfileUsersRouter } from "./routers/insta-profile-users";
+import { editorialResearchRouter } from "./routers/editorial-research";
+import { instaProfilePhotoRouter } from "./routers/insta-profile-photo";
+import { editorRouter } from "./routers/editor";
 
 export async function createTRPCContext() {
   const supabase = await createServerSupabaseClient();
@@ -58,15 +62,19 @@ export const appRouter = router({
   jobs: jobsRouter,
   socialAccounts: socialAccountsRouter,
   invitations: invitationsRouter,
-  chat: chatRouter,
   llm: llmRouter,
   analytics: analyticsRouter,
-  threads: threadsRouter,
   instaFetcher: instaFetcherRouter,
   fbFetcher: fbFetcherRouter,
   fbSession: fbSessionRouter,
   fbScraper: fbScraperRouter,
   instaComments: instaCommentsRouter,
+  fbSessionBridge: fbSessionBridgeRouter,
+  fbProfileLibrary: fbProfileLibraryRouter,
+  instaProfileUsers: instaProfileUsersRouter,
+  editorialResearch: editorialResearchRouter,
+  instaProfilePhoto: instaProfilePhotoRouter,
+  editor: editorRouter,
 });
 
 export type AppRouter = typeof appRouter;

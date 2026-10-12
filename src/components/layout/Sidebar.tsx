@@ -1,80 +1,98 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { isGodUser } from "@/lib/god";
-import type { UserProfile, Mode } from "@/lib/types";
+import type { Capability } from "@/lib/deployment";
+import { useDeploymentMode } from "@/lib/hooks/use-deployment-mode";
+import type { UserProfile } from "@/lib/types";
 import {
   Image,
-  Upload,
-  CalendarDays,
-  ListTodo,
   Link2,
   Building2,
   Settings,
-  MessageSquare,
   BarChart3,
   FileText,
-  Download,
-  Brain,
-  Heart,
-  Users,
-  MessagesSquare,
   Clock,
-  Search,
+  ChevronRight,
+  Wand2,
 } from "lucide-react";
 
 interface NavItem {
   label: string;
   href: string;
   icon: React.ElementType;
-  mode: Mode;
   roles?: string[];
+  hideForGod?: boolean;
+  /**
+   * Capability this page needs. In live (Vercel) mode the item is hidden when
+   * the capability is unavailable there — the page's backend genuinely does not
+   * exist on serverless, so linking to it would be a dead end.
+   */
+  capability?: Capability;
 }
 
-const navItems: NavItem[] = [
-  // Chat Mode
-  { label: "Chat", href: "/chat", icon: MessageSquare, mode: "chat" },
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+  collapsible?: boolean;
+  matchPrefix?: string;
+}
 
-  // Click Mode
-  { label: "Media Library", href: "/library", icon: Image, mode: "click" },
-  { label: "Upload", href: "/upload", icon: Upload, mode: "click" },
-  { label: "Calendar", href: "/calendar", icon: CalendarDays, mode: "click" },
-  { label: "Threads", href: "/threads", icon: MessagesSquare, mode: "click" },
-  { label: "Queue", href: "/queue", icon: ListTodo, mode: "click" },
-  { label: "Accounts", href: "/accounts", icon: Link2, mode: "click" },
-  { label: "Instagram", href: "/instagram", icon: Search, mode: "click" },
-  { label: "Facebook", href: "/fb-scraper", icon: Users, mode: "click" },
+function InstagramIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect width="20" height="20" x="2" y="2" rx="5" ry="5" />
+      <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+      <line x1="17.5" x2="17.51" y1="6.5" y2="6.5" />
+    </svg>
+  );
+}
+
+function FacebookIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" />
+    </svg>
+  );
+}
+
+const navGroups: NavGroup[] = [
   {
-    label: "Brands",
-    href: "/brands",
-    icon: Building2,
-    mode: "click",
-    roles: ["super_admin", "agency_admin", "agency_editor"],
+    label: "Studio",
+    items: [
+      { label: "Media Library", href: "/library", icon: Image },
+      { label: "Editor", href: "/editor", icon: Wand2 },
+    ],
   },
   {
-    label: "Settings",
-    href: "/settings",
-    icon: Settings,
-    mode: "click",
+    label: "Social tools",
+    items: [
+      { label: "Instagram", href: "/instagram-hub", icon: InstagramIcon, capability: "scrapers" },
+      { label: "Facebook", href: "/facebook-hub", icon: FacebookIcon, capability: "scrapers" },
+    ],
   },
-
-  // Analytics Mode
-  { label: "Overview", href: "/analytics", icon: BarChart3, mode: "analytics" },
-  { label: "Intelligence", href: "/analytics/intelligence", icon: Brain, mode: "analytics" },
-  { label: "Sentiment", href: "/analytics/sentiment", icon: Heart, mode: "analytics" },
-  { label: "Competitors", href: "/analytics/competitors", icon: Users, mode: "analytics" },
-  { label: "Best Times", href: "/analytics/best-times", icon: Clock, mode: "analytics" },
-  { label: "Post Analytics", href: "/analytics/posts", icon: FileText, mode: "analytics" },
-  { label: "Export", href: "/analytics/export", icon: Download, mode: "analytics" },
+  {
+    label: "Analytics",
+    collapsible: true,
+    matchPrefix: "/analytics",
+    items: [
+      { label: "Overview", href: "/analytics", icon: BarChart3 },
+      { label: "Best Times", href: "/analytics/best-times", icon: Clock },
+      { label: "Post Analytics", href: "/analytics/posts", icon: FileText },
+    ],
+  },
+  {
+    label: "Manage",
+    items: [
+      { label: "Accounts", href: "/accounts", icon: Link2 },
+      { label: "Brands", href: "/brands", icon: Building2, roles: ["super_admin", "agency_admin", "agency_editor"], hideForGod: true },
+      { label: "Settings", href: "/settings", icon: Settings },
+    ],
+  },
 ];
-
-function getCurrentMode(pathname: string): Mode {
-  if (pathname.startsWith("/chat")) return "chat";
-  if (pathname.startsWith("/analytics")) return "analytics";
-  return "click";
-}
 
 interface SidebarProps {
   profile: UserProfile | null;
@@ -82,19 +100,40 @@ interface SidebarProps {
 
 export function Sidebar({ profile }: SidebarProps) {
   const pathname = usePathname();
-  const currentMode = getCurrentMode(pathname);
-
   const god = isGodUser(profile);
-  const visibleItems = navItems.filter((item) => {
-    if (item.mode !== currentMode) return false;
-    if (item.roles && profile && !item.roles.includes(profile.role)) return false;
-    // God (single-user) mode: no brand management — it's a personal studio.
-    if (god && item.href === "/brands") return false;
-    return true;
-  });
+  const { can } = useDeploymentMode();
+  // Analytics is important — keep its group expanded by default (still collapsible).
+  const [analyticsOpen, setAnalyticsOpen] = useState(true);
+
+  function isItemActive(href: string): boolean {
+    if (href === "/instagram-hub") {
+      return (
+        pathname.startsWith("/instagram-hub") ||
+        pathname.startsWith("/insta-") ||
+        pathname === "/editorial-review" ||
+        pathname.startsWith("/instagram")
+      );
+    }
+    if (href === "/facebook-hub") {
+      return pathname.startsWith("/facebook-hub") || pathname.startsWith("/facebook") || pathname.startsWith("/fb-");
+    }
+    // Exact match for /analytics so it doesn't swallow its own sub-routes.
+    if (href === "/analytics") return pathname === "/analytics";
+    return pathname === href || pathname.startsWith(href + "/");
+  }
+
+  function visibleItems(items: NavItem[]): NavItem[] {
+    return items.filter((item) => {
+      if (item.roles && profile && !item.roles.includes(profile.role)) return false;
+      if (god && item.hideForGod) return false;
+      // Hidden in live mode when the page's backend cannot run on Vercel.
+      if (item.capability && !can(item.capability)) return false;
+      return true;
+    });
+  }
 
   return (
-    <aside className="w-60 border-r border-sidebar-border bg-sidebar text-sidebar-foreground h-full flex flex-col">
+    <aside className="w-60 border-r border-sidebar-border bg-sidebar text-sidebar-foreground h-full flex flex-col shrink-0">
       <div className="p-4 border-b border-sidebar-border">
         <Link href="/library" className="flex items-center gap-2.5 group">
           <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-primary to-chart-2 flex items-center justify-center shadow-sm ring-1 ring-inset ring-white/10 transition-transform group-hover:scale-105">
@@ -104,29 +143,56 @@ export function Sidebar({ profile }: SidebarProps) {
         </Link>
       </div>
 
-      <nav className="flex-1 p-3 space-y-1">
-        {visibleItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+      <nav className="flex-1 p-3 space-y-5 overflow-y-auto">
+        {navGroups.map((group) => {
+          const items = visibleItems(group.items);
+          if (items.length === 0) return null;
+
+          const groupActive = group.matchPrefix ? pathname.startsWith(group.matchPrefix) : false;
+          const open = group.collapsible ? analyticsOpen || groupActive : true;
+
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "group flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150",
-                isActive
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
-                  : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+            <div key={group.label} className="space-y-1">
+              {group.collapsible ? (
+                <button
+                  onClick={() => setAnalyticsOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 hover:text-sidebar-foreground/70 transition-colors"
+                >
+                  {group.label}
+                  <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
+                </button>
+              ) : (
+                <p className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+                  {group.label}
+                </p>
               )}
-            >
-              <Icon
-                className={cn(
-                  "h-4 w-4 shrink-0 transition-colors",
-                  isActive ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground"
-                )}
-              />
-              {item.label}
-            </Link>
+
+              {open &&
+                items.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = isItemActive(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={cn(
+                        "group flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150",
+                        isActive
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm font-semibold"
+                          : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "h-4 w-4 shrink-0 transition-colors",
+                          isActive ? "text-primary" : "text-sidebar-foreground/50 group-hover:text-sidebar-foreground"
+                        )}
+                      />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+            </div>
           );
         })}
       </nav>
@@ -138,9 +204,7 @@ export function Sidebar({ profile }: SidebarProps) {
               {god ? "G" : profile.name?.[0]?.toUpperCase() || "?"}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">
-                {god ? "God" : profile.name}
-              </p>
+              <p className="text-sm font-medium truncate">{god ? "God" : profile.name}</p>
               <p className="text-xs text-muted-foreground truncate">
                 {god ? "Owner · full access" : profile.role.replace(/_/g, " ")}
               </p>

@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "MediaHub Instagram Profile Photo Sync",
+  "version": "1.0.0",
+  "description": "Upload official district profile photos to Instagram automatically on https://www.instagram.com/accounts/edit/",
+  "permissions": ["storage", "activeTab", "tabs"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://localhost:3443/*",
+    "https://127.0.0.1:3443/*",
+    "https://192.168.1.5:3443/*",
+    "http://localhost:3010/*",
+    "http://127.0.0.1:3010/*",
+    "http://localhost:3000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://localhost:3443/*",
+        "https://127.0.0.1:3443/*",
+        "https://192.168.1.5:3443/*",
+        "http://localhost:3010/*",
+        "http://127.0.0.1:3010/*",
+        "http://localhost:3000/*"
+      ],
+      "js": ["mediahub-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.instagram.com/accounts/edit/*",
+        "https://www.instagram.com/accounts/edit*"
+      ],
+      "js": ["instagram-photo-uploader.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "MediaHub Instagram Photo Sync",
+    "default_popup": "popup.html"
+  }
+}

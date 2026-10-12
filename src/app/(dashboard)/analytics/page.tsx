@@ -3,15 +3,15 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useBrand } from "@/lib/hooks/use-brand";
+import { cn } from "@/lib/utils";
 import { trpc } from "@/lib/trpc/client";
+import { DateRangePicker, type DateRange } from "@/components/analytics/DateRangePicker";
 import {
   BarChart3, Brain, Heart, Users, Eye, MessageSquare,
-  Share2, TrendingUp, MousePointer, Clock, Timer, Loader2, ArrowUpRight, ArrowDownRight, RefreshCw,
+  Share2, TrendingUp, MousePointer, Clock, Timer, Loader2, ArrowUpRight, ArrowDownRight,
 } from "lucide-react";
-import { toast } from "sonner";
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, PieChart, Pie, Cell,
@@ -33,30 +33,35 @@ const CHART_COLORS: Record<string, string> = {
   facebook: "#1877F2", tiktok: "#25F4EE", twitter: "#1DA1F2", snapchat: "#F7D800", unknown: "#94a3b8",
 };
 
-type Period = "7d" | "30d" | "90d";
+
+function toYMD(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function defaultRange(): DateRange {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 29);
+  return { start: new Date(start.getFullYear(), start.getMonth(), start.getDate()), end: new Date(end.getFullYear(), end.getMonth(), end.getDate()) };
+}
 
 export default function AnalyticsPage() {
   const { activeBrandId, loading } = useBrand();
-  const [period, setPeriod] = useState<Period>("30d");
+  const [range, setRange] = useState<DateRange>(defaultRange);
+  const startDate = toYMD(range.start);
+  const endDate = toYMD(range.end);
 
-  const { data: summary, isLoading: summaryLoading, refetch: refetchSummary } = trpc.analytics.getSummary.useQuery(
-    { brandId: activeBrandId! },
+  const { data: summary, isLoading: summaryLoading } = trpc.analytics.getSummary.useQuery(
+    { brandId: activeBrandId!, startDate, endDate },
     { enabled: !!activeBrandId }
   );
 
-  const { data: timeSeries, isLoading: tsLoading, refetch: refetchTimeSeries } = trpc.analytics.getAnalyticsTimeSeries.useQuery(
-    { brandId: activeBrandId!, period },
+  const { data: timeSeries, isLoading: tsLoading } = trpc.analytics.getAnalyticsTimeSeries.useQuery(
+    { brandId: activeBrandId!, startDate, endDate },
     { enabled: !!activeBrandId }
   );
-
-  const refreshMutation = trpc.analytics.refreshAnalytics.useMutation({
-    onSuccess: () => {
-      toast.success("Analytics refresh started. Data will update in a few seconds.");
-      // Refetch after a delay to allow the worker to process
-      setTimeout(() => { refetchSummary(); refetchTimeSeries(); }, 8000);
-    },
-    onError: (error) => toast.error(error.message),
-  });
 
   if (loading) {
     return (
@@ -139,7 +144,7 @@ export default function AnalyticsPage() {
       : Math.round(vals.reduce((s, v) => s + v, 0) / vals.length * 100) / 100;
   }
 
-  function StatCard({ icon, label, value, sub }: {
+  function StatCard({ icon, label, value }: {
     icon: React.ReactNode; label: string; value: string; sub?: Record<string, string>;
   }) {
     return (
@@ -147,23 +152,46 @@ export default function AnalyticsPage() {
         <CardContent className="pt-4 pb-3">
           <div className="flex items-center gap-2 mb-1">
             {icon}
-            <p className="text-xl font-bold">{value}</p>
+            <p className="text-2xl font-bold tabular-nums">{value}</p>
           </div>
-          <p className="text-xs text-muted-foreground mb-1">{label}</p>
-          {sub && Object.keys(sub).length > 0 && (
-            <div className="space-y-0.5 border-t pt-1.5 mt-1">
-              {Object.entries(sub).map(([p, v]) => (
-                <div key={p} className="flex justify-between text-[11px]">
-                  <span className="text-muted-foreground">{PLATFORM_LABELS[p] || p}</span>
-                  <span className="font-medium">{v}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <p className="text-xs text-muted-foreground">{label}</p>
         </CardContent>
       </Card>
     );
   }
+
+  // Per-account rows for the consolidated breakdown table (one row per account).
+  const accountRows = Object.entries(ba)
+    .map(([key, d]) => {
+      const [plat, ...rest] = key.split("/");
+      const data = (d as any) || {};
+      return {
+        key,
+        platform: plat,
+        name: rest.join("/"),
+        posts: data.posts || 0,
+        views: data.views || 0,
+        reach: data.reach || 0,
+        likes: data.likes || 0,
+        comments: data.comments || 0,
+        shares: data.shares || 0,
+        engagement: data.engagement || 0,
+      };
+    })
+    .sort((a, b) => b.posts - a.posts || b.views - a.views);
+
+  type AcctMetric = "posts" | "views" | "reach" | "likes" | "comments" | "shares" | "engagement";
+  const accountColumns: { key: AcctMetric; label: string; fmt?: (n: number) => string }[] = (
+    [
+      { key: "posts", label: "Posts" },
+      { key: "views", label: "Views" },
+      { key: "reach", label: "Reach" },
+      { key: "likes", label: "Likes" },
+      { key: "comments", label: "Comments" },
+      { key: "shares", label: "Shares" },
+      { key: "engagement", label: "Eng %", fmt: (n: number) => `${n}%` },
+    ] as { key: AcctMetric; label: string; fmt?: (n: number) => string }[]
+  ).filter((c) => accountRows.some((r) => r[c.key] > 0));
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload) return null;
@@ -188,24 +216,7 @@ export default function AnalyticsPage() {
           <h1 className="text-2xl font-bold">Analytics Overview</h1>
           <p className="text-muted-foreground">Performance across all platforms</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => activeBrandId && refreshMutation.mutate({ brandId: activeBrandId })}
-            disabled={refreshMutation.isPending || !activeBrandId}
-          >
-            {refreshMutation.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
-            Refresh
-          </Button>
-          <div className="flex gap-1">
-            {(["7d", "30d", "90d"] as Period[]).map((p) => (
-              <Button key={p} variant={period === p ? "default" : "outline"} size="sm" onClick={() => setPeriod(p)}>
-                {p}
-              </Button>
-            ))}
-          </div>
-        </div>
+        <DateRangePicker value={range} onChange={setRange} />
       </div>
 
       {/* KPI Cards */}
@@ -279,6 +290,62 @@ export default function AnalyticsPage() {
           return cards.map((c, i) => <StatCard key={i} {...c} />);
         })()}
       </div>
+
+      {/* Per-account breakdown */}
+      {accountRows.length > 0 && accountColumns.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">By account</CardTitle>
+            <p className="text-xs text-muted-foreground">{accountRows.length} connected accounts</p>
+          </CardHeader>
+          <CardContent>
+            <div className="max-h-[22rem] overflow-auto rounded-lg border">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm">
+                  <tr className="text-left">
+                    <th className="px-3 py-2 font-medium text-muted-foreground">Account</th>
+                    {accountColumns.map((c) => (
+                      <th key={String(c.key)} className="px-3 py-2 font-medium text-muted-foreground text-right whitespace-nowrap">
+                        {c.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {accountRows.map((r) => (
+                    <tr key={r.key} className="border-t hover:bg-muted/40">
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="h-2 w-2 rounded-full shrink-0"
+                            style={{ backgroundColor: PLATFORM_COLORS[r.platform] || PLATFORM_COLORS.unknown }}
+                          />
+                          <span className="truncate font-medium">@{r.name.replace(/^@+/, "")}</span>
+                          <span className="text-[11px] text-muted-foreground shrink-0">{PLATFORM_LABELS[r.platform] || r.platform}</span>
+                        </div>
+                      </td>
+                      {accountColumns.map((c) => {
+                        const val = r[c.key];
+                        return (
+                          <td
+                            key={String(c.key)}
+                            className={cn(
+                              "px-3 py-2 text-right tabular-nums",
+                              val > 0 ? "text-foreground" : "text-muted-foreground/40"
+                            )}
+                          >
+                            {c.fmt ? c.fmt(val) : val.toLocaleString()}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Views Growth Chart */}
       <Card>
@@ -471,62 +538,6 @@ export default function AnalyticsPage() {
         </Card>
       )}
 
-      {/* Navigation to sub-pages */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Link href="/analytics/intelligence" className="block">
-          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-purple-100 flex items-center justify-center">
-                  <Brain className="h-5 w-5 text-purple-700" />
-                </div>
-                <CardTitle className="text-base">Content Intelligence</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                AI-powered category performance, trend forecasts, content recommendations, and weekly plans.
-              </p>
-            </CardContent>
-          </Card>
-        </Link>
-
-        <Link href="/analytics/sentiment" className="block">
-          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-pink-100 flex items-center justify-center">
-                  <Heart className="h-5 w-5 text-pink-700" />
-                </div>
-                <CardTitle className="text-base">Sentiment Analysis</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                Audience sentiment from comments, top themes, purchase intent, and response tracking.
-              </p>
-            </CardContent>
-          </Card>
-        </Link>
-
-        <Link href="/analytics/competitors" className="block">
-          <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <Users className="h-5 w-5 text-blue-700" />
-                </div>
-                <CardTitle className="text-base">Competitor Benchmarking</CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                Track competitor handles, compare follower counts, and benchmark engagement rates.
-              </p>
-            </CardContent>
-          </Card>
-        </Link>
-      </div>
     </div>
   );
 }
